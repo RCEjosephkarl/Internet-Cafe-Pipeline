@@ -1,0 +1,5 @@
+member_id,first_name,last_name,email,phone_number,current_tier,current_points_balance,lifetime_spend_amount,registered_at
+M-1901,Francis,Hernandez,francis.hernandez@yahoo.com,+63 917 966 0803,Standard,80,380.00,2026-08-06T16:13:00+08:00
+M-2011,Jose,Cortez,jose.cortez1@outlook.ph,+63 918 377 8554,Standard,49,0.00,2026-08-06T19:50:00+08:00
+M-2058,Bianca,Villanueva,bianca.villanueva@aim.edu.ph,+63 945 655 5698,Standard,19,0.00,2026-08-06T14:39:00+08:00
+M-2182,Joy,Flores,joy.flores@aim.edu.ph,+63 945 827 5548,Standard,20,0.00,2026-08-06T11:06:00+08:00

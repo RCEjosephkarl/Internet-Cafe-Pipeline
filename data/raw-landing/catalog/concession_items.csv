@@ -1,0 +1,11 @@
+item_sku,item_name,category,unit_cost_price,unit_retail_price,stock_quantity
+SKU-BEV-01,Iced Mountain Tea 500ml,Beverage,28.00,65.00,250
+SKU-BEV-02,Citrus Energy Drink 330ml,Beverage,45.00,90.00,180
+SKU-BEV-03,Mineral Water 500ml,Beverage,12.00,30.00,300
+SKU-BEV-04,Cold Brew Coffee 300ml,Beverage,40.00,85.00,120
+SKU-SNK-01,Spicy Tonkotsu Ramen Bowl,Hot Food,55.00,120.00,90
+SKU-SNK-02,Cheesy Nacho Platter,Hot Food,60.00,135.00,75
+SKU-SNK-03,Truffle Potato Crisps 100g,Snacks,30.00,75.00,140
+SKU-SNK-04,Salted Caramel Popcorn 80g,Snacks,25.00,60.00,110
+SKU-ACC-01,Disposable Anti-Bacterial Ear Pads,Accessories,8.00,25.00,400
+SKU-ACC-02,Braided USB-C Charging Cable 1m,Accessories,80.00,180.00,50
