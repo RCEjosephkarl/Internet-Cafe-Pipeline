@@ -33,8 +33,9 @@ link: ## Create the §2 logical paths (/opt/aimternet, /opt/airflow). Needs sudo
 	mkdir -p $(AIRFLOW_HOME)/dags $(AIRFLOW_HOME)/input
 	@[ -e $(AIRFLOW_HOME)/input/raw-landing ] || ln -s $(REPO_ROOT)/data/raw-landing $(AIRFLOW_HOME)/input/raw-landing
 	@for f in $(REPO_ROOT)/dags/*.py; do \
+	   [ -e "$$f" ] || continue; \
 	   [ -e $(AIRFLOW_HOME)/dags/$$(basename $$f) ] || ln -s $$f $(AIRFLOW_HOME)/dags/$$(basename $$f); \
-	 done 2>/dev/null || true
+	 done
 	@echo "linked: $(OPT_AIMTERNET)/data/raw-landing, $(OPT_AIRFLOW), $(AIRFLOW_HOME)/{dags,input}"
 
 test: ## Run the test suite (AWS/RDS/Redshift-marked tests excluded)
