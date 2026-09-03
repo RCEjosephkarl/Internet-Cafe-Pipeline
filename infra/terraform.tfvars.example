@@ -1,0 +1,33 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored — it names a real
+# bucket, and real names are not committed (spec §8).
+#
+#   cp terraform.tfvars.example terraform.tfvars
+#   terraform init && terraform plan
+
+aws_region  = "us-east-1"
+environment = "poc"
+
+# Required — no default, on purpose.
+s3_bucket = "your-bucket-name"
+
+# Defaults already match the pipeline; override only if you renamed something.
+# s3_prefixes = {
+#   bronze     = "bronze"
+#   silver     = "silver"
+#   gold       = "gold"
+#   quarantine = "quarantine"
+#   manifests  = "manifests"
+# }
+# ddb_events_table    = "aimternet_workstation_events"
+# ddb_telemetry_table = "aimternet_workstation_telemetry"
+
+# Leave false unless you have re-based expires_at into the future. Finding F2: enabling TTL
+# on the as-shipped data deletes ~61 of 62 days within 48 hours.
+ddb_ttl_enabled = false
+
+# Leave true when the tables already exist (they do, after `make bootstrap`).
+adopt_existing_dynamodb_tables = true
+
+# Leave false in a shared account: the EC2 instance profile already exists and the Redshift
+# cluster is not ours to modify.
+manage_iam = false

@@ -13,7 +13,8 @@ AIRFLOW_HOME  ?= $(HOME)/airflow
 
 export PYTHONPATH := $(REPO_ROOT)/src
 
-.PHONY: help env link test lint typecheck check migrate assumptions validate quarantine-demo manifest bronze \
+.PHONY: help env link test lint typecheck check migrate assumptions docs infra-plan validate \
+        quarantine-demo manifest bronze \
         bootstrap load-rds load-dynamodb curate redshift \
         reconcile api metrics airflow dashboard clean
 
@@ -61,6 +62,13 @@ migrate: ## Apply database migrations
 
 assumptions: ## Show every POC policy decision and its evidence
 	$(PY) -m aimternet.pipeline.cli assumptions
+
+docs: ## Regenerate the docs rendered from code (docs/assumptions.md)
+	$(PY) -m aimternet.pipeline.cli assumptions --markdown > docs/assumptions.md
+	@echo "wrote docs/assumptions.md"
+
+infra-plan: ## terraform plan for infra/ — read-only; apply needs approval, destroy never
+	cd infra && terraform init -input=false && terraform plan -input=false
 
 validate: ## Stage C only: validate all 62 batches locally, no AWS needed
 	$(PY) -m aimternet.pipeline.cli validate

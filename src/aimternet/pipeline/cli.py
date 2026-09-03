@@ -72,11 +72,42 @@ def _cmd_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def assumptions_markdown() -> str:
+    """The policy register as Markdown, so docs/assumptions.md cannot drift from the code.
+
+    tests/unit/test_assumptions_doc.py regenerates this and compares; `make docs` rewrites
+    the file. One register, one rendering — the §3 no-rule-twice rule applied to prose.
+    """
+    lines = [
+        "# Assumptions and policy decisions",
+        "",
+        "**Generated from `src/aimternet/config/poc_policy.py`. Do not edit by hand —**",
+        "**run `make docs`.** `make assumptions` prints the same register to a terminal and",
+        "`--json` emits it for a machine.",
+        "",
+        "Every entry here is a place where the source data was silent or contradicted the",
+        "spec, and a decision had to be made and recorded rather than buried in a transform",
+        "(spec §0.5, §11).",
+        "",
+    ]
+    for assumption in policy().assumptions:
+        reference = f" — spec {assumption.spec_reference}" if assumption.spec_reference else ""
+        lines += [f"## `{assumption.key}`{reference}", ""]
+        lines += ["**Decision.** " + assumption.decision, ""]
+        lines += ["**Why.** " + assumption.rationale, ""]
+        if assumption.evidence:
+            lines += ["**Evidence.** " + assumption.evidence, ""]
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def _cmd_assumptions(args: argparse.Namespace) -> int:
     """Every POC policy decision, with its evidence (spec §0.5, §11)."""
     report = policy().as_report()
     if args.json:
         print(json.dumps(report, indent=2))
+        return 0
+    if args.markdown:
+        print(assumptions_markdown(), end="")
         return 0
     for assumption in policy().assumptions:
         print(f"\n{assumption.key}  [{assumption.spec_reference}]")
@@ -262,6 +293,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     assumptions_p = sub.add_parser("assumptions", help="show every POC policy decision")
     assumptions_p.add_argument("--json", action="store_true")
+    assumptions_p.add_argument("--markdown", action="store_true",
+                               help="render docs/assumptions.md (see `make docs`)")
     assumptions_p.set_defaults(func=_cmd_assumptions)
 
     validate_p = sub.add_parser("validate", help="Stage C: validate the landing tree (no AWS)")
