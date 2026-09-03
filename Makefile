@@ -14,7 +14,7 @@ AIRFLOW_HOME  ?= $(HOME)/airflow
 export PYTHONPATH := $(REPO_ROOT)/src
 
 .PHONY: help env link test lint typecheck check migrate assumptions validate manifest bronze \
-        bootstrap curate redshift \
+        bootstrap load-rds load-dynamodb curate redshift \
         reconcile api metrics airflow dashboard clean
 
 help:
@@ -73,7 +73,13 @@ bronze: ## Stages A+B: inventory then copy the landing tree into S3 Bronze
 bootstrap: ## Full bootstrap: manifest -> Bronze -> validate -> RDS -> DynamoDB
 	$(PY) -m aimternet.pipeline.cli bootstrap
 
-curate: ## Silver + Gold Parquet
+load-rds: ## Load the validated source data into RDS PostgreSQL
+	$(PY) -m aimternet.pipeline.cli load-rds
+
+load-dynamodb: ## Create DynamoDB tables and load events + telemetry
+	$(PY) -m aimternet.pipeline.cli load-dynamodb
+
+curate: ## Silver + RDS export + Gold Parquet
 	$(PY) -m aimternet.pipeline.cli curate
 
 redshift: ## Redshift DDL + COPY/MERGE

@@ -151,6 +151,42 @@ def _cmd_bronze(args: argparse.Namespace) -> int:
     return 1 if result.outcome.failed else 0
 
 
+def _cmd_load_rds(args: argparse.Namespace) -> int:
+    from aimternet.pipeline.loaders.rds import load_all
+
+    print(load_all(run_id=args.run_id or "").summary())
+    return 0
+
+
+def _cmd_load_dynamodb(args: argparse.Namespace) -> int:
+    from aimternet.pipeline.loaders.dynamodb import ensure_tables, load_dataset
+
+    print("tables:", json.dumps(ensure_tables(), indent=2))
+    for dataset in args.datasets:
+        report = load_dataset(
+            dataset, run_id=args.run_id or "", threads=args.threads, days=args.days
+        )
+        print()
+        print(report.summary())
+    return 0
+
+
+def _cmd_curate(args: argparse.Namespace) -> int:
+    """Silver, then the RDS export, then Gold. Order matters: Gold reads both."""
+    from aimternet.pipeline.curate import export_rds, gold, silver
+
+    run_id = args.run_id or f"curate-{uuid.uuid4().hex[:12]}"
+    if args.layer in ("silver", "all"):
+        print(silver.build(run_id, telemetry_days=args.telemetry_days).summary())
+        print()
+    if args.layer in ("export", "all"):
+        print(export_rds.export(run_id, full=args.full).summary())
+        print()
+    if args.layer in ("gold", "all"):
+        print(gold.build(run_id).summary())
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aimternet", description=__doc__)
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
@@ -188,6 +224,27 @@ def build_parser() -> argparse.ArgumentParser:
     bronze_p.add_argument("--verify-sample", type=int, default=200,
                           help="how many objects to checksum-verify (default 200)")
     bronze_p.set_defaults(func=_cmd_bronze)
+
+    rds_p = sub.add_parser("load-rds", help="load the validated source data into RDS")
+    rds_p.add_argument("--run-id", default=None)
+    rds_p.set_defaults(func=_cmd_load_rds)
+
+    ddb_p = sub.add_parser("load-dynamodb", help="create tables and load events/telemetry")
+    ddb_p.add_argument(
+        "--datasets", nargs="+", default=["workstation_events", "telemetry"],
+        choices=["workstation_events", "telemetry"],
+    )
+    ddb_p.add_argument("--days", type=int, default=None, help="limit to the first N days")
+    ddb_p.add_argument("--threads", type=int, default=None)
+    ddb_p.add_argument("--run-id", default=None)
+    ddb_p.set_defaults(func=_cmd_load_dynamodb)
+
+    curate_p = sub.add_parser("curate", help="build Silver and Gold from Bronze")
+    curate_p.add_argument("--layer", choices=("silver", "export", "gold", "all"), default="all")
+    curate_p.add_argument("--telemetry-days", type=int, default=None)
+    curate_p.add_argument("--full", action="store_true", help="full RDS export, not incremental")
+    curate_p.add_argument("--run-id", default=None)
+    curate_p.set_defaults(func=_cmd_curate)
 
     return parser
 

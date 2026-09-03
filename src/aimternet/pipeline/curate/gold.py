@@ -223,10 +223,10 @@ def build(run_id: str) -> GoldReport:
                    l.points_delta,
                    -- Derived by summation, not read from the source column: resulting_balance
                    -- does not reconstruct in timestamp order (finding F5).
-                   sum(l.points_delta) OVER (
+                   CAST(sum(l.points_delta) OVER (
                        PARTITION BY l.member_id ORDER BY l.created_at_utc, l.ledger_id
                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-                   ) AS running_balance,
+                   ) AS BIGINT) AS running_balance,
                    l.resulting_balance_source,
                    l.created_at_utc,
                    CAST(strftime(l.created_at_utc, '%Y%m%d') AS INTEGER) AS date_key,
