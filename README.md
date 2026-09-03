@@ -115,12 +115,16 @@ DynamoDB.
 
 ## Notebooks
 
-| Notebook | What it is |
-|---|---|
-| `notebooks/pos_terminal.ipynb` | Front-desk POS. HTTP to the API only — no DB access, no credentials. |
-| `notebooks/airflow_lens.ipynb` | Observe and control DAGs, runs, tasks, Variables and pools via the Airflow REST API. |
-| `notebooks/db_lens.ipynb` | Read-only explorer over RDS (OLTP) and Redshift (OLAP). |
-| `notebooks/dashboard_lens.ipynb` | Exercises the metrics API and links to the live dashboard. |
+| Notebook | What it is | Prerequisite |
+|---|---|---|
+| `notebooks/pos_terminal.ipynb` | Front-desk POS — check members in/out, sell concessions. HTTP to the API only, no DB access, no credentials (invariant #3). | `make api` running. |
+| `notebooks/airflow_lens.ipynb` | Observe and control DAGs, runs, tasks, Variables and pools via the Airflow REST API — no DAG source edits. | `make airflow` running as `standalone` (api-server alone shows scheduler/triggerer as `unhealthy`). |
+| `notebooks/db_lens.ipynb` | Read-only explorer over RDS (`aimternet_oltp`) and Redshift (`aimternet_olap`), via the `aimternet_ro` role in a `READ ONLY` transaction. | RDS migrated (`make migrate` / `make bootstrap`) for the OLTP half; `make redshift` for the OLAP half. No service needs to be running — it connects to the databases directly. |
+| `notebooks/dashboard_lens.ipynb` | Exercises every `/v1/metrics/*` endpoint and links to the live dashboard. | `make api` running, with data in RDS, Redshift and DynamoDB to get meaningful numbers (`make bootstrap` + `make curate` + `make redshift`). |
+
+Typical order: `make bootstrap` (or trigger it from `airflow_lens.ipynb` once `make airflow` is up) →
+`make api` for `pos_terminal.ipynb` and the OLTP half of `db_lens.ipynb` → `make curate` +
+`make redshift` → the OLAP half of `db_lens.ipynb` and `dashboard_lens.ipynb`.
 
 ## Cost
 

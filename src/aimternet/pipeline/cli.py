@@ -193,6 +193,37 @@ def _cmd_bronze(args: argparse.Namespace) -> int:
     return 1 if result.outcome.failed else 0
 
 
+def _cmd_bootstrap(args: argparse.Namespace) -> int:
+    """Stages A-D (spec §6.1): manifest+Bronze -> validate -> RDS -> DynamoDB.
+
+    Mirrors dags/bootstrap_raw_landing.py stage for stage, calling the same _cmd_* wrappers
+    the standalone `bronze`/`validate`/`load-rds`/`load-dynamodb` subcommands use, so there is
+    still exactly one implementation of each stage.
+    """
+    rc = _cmd_bronze(argparse.Namespace(
+        telemetry_days=args.telemetry_days, run_id=None, threads=None,
+        verify=True, verify_sample=200,
+    ))
+    if rc != 0:
+        return rc
+
+    rc = _cmd_validate(argparse.Namespace(
+        telemetry_days=args.telemetry_days, json_out=None, landing=None,
+        run_id=None, no_publish=False,
+    ))
+    if rc != 0:
+        return rc
+
+    rc = _cmd_load_rds(argparse.Namespace(run_id=None))
+    if rc != 0:
+        return rc
+
+    return _cmd_load_dynamodb(argparse.Namespace(
+        datasets=["workstation_events", "telemetry"],
+        days=args.telemetry_days, threads=None, run_id=None,
+    ))
+
+
 def _cmd_load_rds(args: argparse.Namespace) -> int:
     from aimternet.pipeline.loaders.rds import load_all
 
@@ -320,6 +351,14 @@ def build_parser() -> argparse.ArgumentParser:
     bronze_p.add_argument("--verify-sample", type=int, default=200,
                           help="how many objects to checksum-verify (default 200)")
     bronze_p.set_defaults(func=_cmd_bronze)
+
+    bootstrap_p = sub.add_parser(
+        "bootstrap",
+        help="Stages A-D: manifest+Bronze -> validate -> RDS -> DynamoDB (spec §6.1)",
+    )
+    bootstrap_p.add_argument("--telemetry-days", type=int, default=None,
+                             help="limit telemetry to the first N days (default: all 62)")
+    bootstrap_p.set_defaults(func=_cmd_bootstrap)
 
     rds_p = sub.add_parser("load-rds", help="load the validated source data into RDS")
     rds_p.add_argument("--run-id", default=None)
