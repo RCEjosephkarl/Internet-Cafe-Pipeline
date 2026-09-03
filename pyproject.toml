@@ -47,5 +47,8 @@ no_implicit_optional = true
 exclude = ["src/synthesizer"]
 
 [[tool.mypy.overrides]]
-module = ["boto3.*", "botocore.*", "redshift_connector.*", "psycopg2.*", "pyarrow.*", "moto.*", "airflow.*"]
+module = [
+    "boto3.*", "botocore.*", "redshift_connector.*", "psycopg2.*",
+    "duckdb.*", "moto.*", "airflow.*", "pandas.*", "yaml.*",
+]
 ignore_missing_imports = true

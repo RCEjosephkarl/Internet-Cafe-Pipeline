@@ -13,7 +13,7 @@ AIRFLOW_HOME  ?= $(HOME)/airflow
 
 export PYTHONPATH := $(REPO_ROOT)/src
 
-.PHONY: help env link test lint typecheck check validate bootstrap curate redshift \
+.PHONY: help env link test lint typecheck check migrate assumptions validate bootstrap curate redshift \
         reconcile api metrics airflow dashboard clean
 
 help:
@@ -53,6 +53,12 @@ typecheck: ## mypy on src/aimternet
 	$(PY) -m mypy
 
 check: lint typecheck test ## lint + typecheck + test
+
+migrate: ## Apply database migrations
+	$(PY) -m aimternet.pipeline.cli migrate up
+
+assumptions: ## Show every POC policy decision and its evidence
+	$(PY) -m aimternet.pipeline.cli assumptions
 
 validate: ## Stage C only: validate all 62 batches locally, no AWS needed
 	$(PY) -m aimternet.pipeline.cli validate
