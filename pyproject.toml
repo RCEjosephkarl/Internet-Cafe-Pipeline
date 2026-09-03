@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aimternet"
+version = "0.1.0"
+description = "AIMternet-Cafe data engineering POC: EC2 landing -> S3 -> RDS/DynamoDB -> Silver/Gold -> Redshift"
+requires-python = ">=3.11"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["aimternet*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q --strict-markers"
+markers = [
+    "aws: needs live AWS credentials and resources",
+    "rds: needs a reachable PostgreSQL instance",
+    "redshift: needs a reachable Redshift cluster",
+    "slow: takes more than a few seconds",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+extend-exclude = ["src/synthesizer", "data"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "TID", "RUF"]
+ignore = ["B008"]  # FastAPI Depends() in defaults is idiomatic
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src/aimternet"]
+strict_optional = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+exclude = ["src/synthesizer"]
+
+[[tool.mypy.overrides]]
+module = ["boto3.*", "botocore.*", "redshift_connector.*", "psycopg2.*", "pyarrow.*", "moto.*", "airflow.*"]
+ignore_missing_imports = true
