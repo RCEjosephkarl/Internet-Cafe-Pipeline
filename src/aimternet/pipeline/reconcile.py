@@ -243,6 +243,39 @@ def _rds_counts() -> tuple[dict[str, int], dict[str, int]]:
     return bootstrap, operational
 
 
+def _snapshot_expectations() -> dict[str, int]:
+    """Rows each operational table held *at the instant its snapshot was exported*.
+
+    The snapshot check has to compare two descriptions of the same moment. Silver was written
+    at the export watermark; counting RDS *now* instead makes every row the POS has created
+    since read as a row the export lost. That fails whenever the cafe is open, and -- worse --
+    it cannot tell the failure it exists to catch (F7: the export left a delta where a snapshot
+    belongs) from someone having bought a coffee thirty seconds ago. A check that cannot
+    distinguish broken from normal is not a check.
+
+    Falls back to the live count for a table with no watermark yet: before the first
+    incremental export, the snapshot is simply the whole table.
+    """
+    from aimternet.db.session import fetch_all
+    from aimternet.pipeline.curate.export_rds import EXPORTS
+
+    expected: dict[str, int] = {}
+    for table, (watermark_column, _key) in EXPORTS.items():
+        marks = fetch_all(
+            "SELECT watermark_value FROM pipeline_watermark WHERE pipeline_name = %s",
+            (f"rds_to_s3:{table}",),
+        )
+        if marks:
+            rows = fetch_all(
+                f"SELECT count(*) AS n FROM {table} WHERE {watermark_column} <= %s",
+                (marks[0]["watermark_value"],),
+            )
+        else:
+            rows = fetch_all(f"SELECT count(*) AS n FROM {table}")
+        expected[table] = int(rows[0]["n"])
+    return expected
+
+
 # Snapshots the RDS -> S3 export writes into Silver, and the RDS table each mirrors. Gold
 # reads these as the *current* state of the operational store, so a delta left here in place
 # of a snapshot silently shrinks a dimension. That is not hypothetical: the first incremental
@@ -473,8 +506,10 @@ def reconcile(run_id: str = "", *, include_redshift: bool = True) -> Reconciliat
     # with a NameError if RDS is unreachable — it should just skip those checks.
     rds_bootstrap: dict[str, int] = {}
     rds_operational: dict[str, int] = {}
+    snapshot_expected: dict[str, int] = {}
     try:
         rds_bootstrap, rds_operational = _rds_counts()
+        snapshot_expected = _snapshot_expectations()
         for table, actual in rds_bootstrap.items():
             expected = SOURCE_COUNTS.get(table, 0)
             if table == "members":
@@ -586,19 +621,26 @@ def reconcile(run_id: str = "", *, include_redshift: bool = True) -> Reconciliat
 
         # The snapshots Gold builds those dimensions from must themselves be complete.
         for dataset, rds_table in OPERATIONAL_SNAPSHOTS.items():
-            expected_snapshot = rds_bootstrap.get(rds_table, 0) + rds_operational.get(rds_table, 0)
+            expected_snapshot = snapshot_expected.get(rds_table, 0)
             if not expected_snapshot:
                 continue
             actual_snapshot = silver.get(dataset, 0)
+            # "Never fewer", not "exactly equal", for the same reason gold_rows:dim_member
+            # uses it. The export stamps its watermark before it runs its SELECT, so a row
+            # updated inside that window is legitimately in the snapshot while sorting after
+            # the watermark. That is a millisecond of slack, and F7 was a shortfall of three
+            # orders of magnitude -- 1,200 rows down to 4.
             report.add(
                 Check(
                     name=f"silver_snapshot:{dataset}", layer_from="rds", layer_to="silver",
                     expected=expected_snapshot, actual=actual_snapshot,
-                    passed=actual_snapshot == expected_snapshot,
+                    passed=actual_snapshot >= expected_snapshot,
                     severity=SEVERITY_CRITICAL,
                     detail=(
                         "the RDS -> S3 export must leave a full snapshot in Silver, not the "
-                        "delta it moved; Gold reads this as current operational state"
+                        "delta it moved; Gold reads this as current operational state. "
+                        "Expected is RDS as of the export watermark, so rows the POS created "
+                        "after the last export are not counted as loss"
                     ),
                 )
             )

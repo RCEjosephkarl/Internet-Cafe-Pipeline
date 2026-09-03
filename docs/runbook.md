@@ -128,6 +128,23 @@ make redshift                                                  # push them to th
 make reconcile
 ```
 
+### `silver_snapshot:*` fails while the POS is in use
+
+It should not any more. `expected` is RDS **as of that table's export watermark**, not a live
+count, so rows the POS created since the last `rds_to_s3_incremental` are not counted as loss.
+The comparison is "never fewer", because the export stamps its watermark before it runs its
+SELECT and a row updated inside that window is legitimately in the snapshot.
+
+If it does fail, the snapshot genuinely holds fewer rows than RDS held when it was written —
+that is F7, not lag. Rebuild it:
+
+```bash
+$(PY) -m aimternet.pipeline.cli curate --layer export --full
+```
+
+Before the fix this compared Silver against a live RDS read, so an open cafe failed it
+permanently and it could not distinguish a truncated snapshot from an ordinary sale.
+
 ### `silver_snapshot:workstation_events_operational` fails after a deliberate rebuild
 
 That check has no RDS table to compare against, so it is held to a high-water mark: the
