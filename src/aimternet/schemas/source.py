@@ -22,6 +22,7 @@ from pydantic import (
     ConfigDict,
     Field,
     computed_field,
+    field_validator,
     model_validator,
 )
 
@@ -212,15 +213,28 @@ class RentalTransaction(SourceModel):
 
 
 class ConcessionPurchase(SourceModel):
-    """``legacy_batches/<date>/concession_purchases.csv``."""
+    """``legacy_batches/<date>/concession_purchases.csv``.
+
+    ``rental_id`` is optional: 5,293 of 21,077 purchases (25.1%) are walk-in sales with no
+    associated rental, recorded as an empty string. It is the only column in any dataset that
+    is ever blank, and it becomes NULL rather than '' so the foreign key can hold.
+    """
 
     purchase_id: str = Field(pattern=r"^ORD-\d{8}-\d{4}-\d{4}$")
     member_id: str = Field(pattern=r"^M-\d{4}$")
-    rental_id: str
+    rental_id: str | None = None
     total_amount: Money = Field(ge=0)
     points_accrued: int = Field(ge=0)
     payment_method: PaymentMethod
     purchased_at: datetime
+
+    @field_validator("rental_id", mode="before")
+    @classmethod
+    def _blank_rental_is_a_walk_in(cls, value: object) -> object:
+        """'' means "no rental", not "a rental whose id is the empty string"."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @computed_field  # type: ignore[prop-decorator]
     @property

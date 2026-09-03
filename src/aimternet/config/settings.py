@@ -70,6 +70,7 @@ class Settings(BaseSettings):
     pg_user: str | None = None
     pg_password: SecretStr | None = None
     pg_schema: str = "aimternet_oltp"
+    pg_connect_timeout: int = 15
     pg_ro_user: str = "aimternet_ro"
     pg_ro_password: SecretStr | None = None
 
@@ -131,9 +132,11 @@ class Settings(BaseSettings):
             password = _require(
                 self.pg_password, "AIMTERNET_PG_PASSWORD", "connect to PostgreSQL"
             )
+        # A bounded connect_timeout matters inside loaders: without it a stalled connect
+        # blocks the thread that is draining a thread pool, and the failure is invisible.
         return (
             f"host={host} port={self.pg_port} dbname={self.pg_database} "
-            f"user={user} password={password}"
+            f"user={user} password={password} connect_timeout={self.pg_connect_timeout}"
         )
 
     def redshift_credentials(self) -> dict[str, object]:
