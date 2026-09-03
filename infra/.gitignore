@@ -1,0 +1,8 @@
+# State can contain resource metadata; tfvars names real buckets. Neither belongs in git.
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+terraform.tfvars
+crash.log

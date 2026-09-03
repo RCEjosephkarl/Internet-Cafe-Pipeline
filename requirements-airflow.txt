@@ -1,0 +1,18 @@
+# Airflow is installed against its official constraints file so pip cannot freely
+# re-resolve its dependency tree inside the conda env (spec §2).
+#
+#   PIP="$HOME/.conda/envs/data_eng/bin/pip"
+#   AIRFLOW_VERSION=3.3.0
+#   PYTHON_VERSION=3.12
+#   CONSTRAINT="https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt"
+#   $PIP install -r requirements-airflow.txt --constraint "$CONSTRAINT"
+#
+# NOTE: this env runs Python 3.12, not the 3.11 the spec suggests. Airflow 3.3.0 was
+# already installed and passing `airflow db check` on 3.12; see CLAUDE.md.
+
+apache-airflow==3.3.0
+apache-airflow-providers-amazon==9.31.0
+apache-airflow-providers-postgres==6.8.0
+apache-airflow-providers-common-sql==2.0.1
+apache-airflow-providers-http==6.0.4
+apache-airflow-providers-standard==1.15.0

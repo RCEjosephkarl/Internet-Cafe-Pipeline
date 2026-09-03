@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AIMternet-Cafe — Operations</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header>
+    <h1>AIMternet-Cafe</h1>
+    <span class="sub">Operations dashboard</span>
+    <span class="spacer"></span>
+    <span class="sub" id="updated">never updated</span>
+    <span id="status-pill">connecting…</span>
+  </header>
+
+  <main>
+    <div class="tiles" id="tiles"></div>
+
+    <div class="grid">
+      <section class="card">
+        <h2>Revenue today</h2>
+        <div id="revenue"></div>
+      </section>
+
+      <section class="card">
+        <h2>Points</h2>
+        <div id="points"></div>
+      </section>
+
+      <section class="card">
+        <h2>Workstations by zone</h2>
+        <div id="zones"></div>
+      </section>
+
+      <section class="card">
+        <h2>Revenue by zone (warehouse)</h2>
+        <div id="zone-revenue"></div>
+      </section>
+
+      <section class="card">
+        <h2>Active rentals</h2>
+        <div class="scroll" id="active"></div>
+      </section>
+
+      <section class="card">
+        <h2>Recent telemetry (DynamoDB)</h2>
+        <div class="scroll" id="telemetry"></div>
+      </section>
+
+      <section class="card" style="grid-column: 1 / -1;">
+        <h2>Hourly utilisation (warehouse aggregate)</h2>
+        <div id="utilization"></div>
+      </section>
+
+      <section class="card" style="grid-column: 1 / -1;">
+        <h2>Floor</h2>
+        <div class="floor" id="floor"></div>
+      </section>
+    </div>
+  </main>
+
+  <footer>
+    Every number on this page comes from the metrics API over HTTP. The page holds no
+    database credentials and makes no database connection.
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

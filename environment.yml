@@ -1,0 +1,67 @@
+# AIMternet-Cafe POC environment.
+#
+#   conda env update -n data_eng -f environment.yml --prune   (or: make env)
+#
+# Python 3.12, not the 3.11 the spec suggests: Airflow 3.3.0 was already installed and
+# passing `airflow db check` on 3.12 in this env, so rebuilding was judged pure downside.
+# Recorded as a deviation in CLAUDE.md.
+#
+# pyarrow is deliberately ABSENT. On this host (kernel 7.0.0-1010-aws) Arrow's thread pool
+# aborts at interpreter shutdown -- "terminate called without an active exception", SIGABRT.
+# Measured 23/30 with the pip wheel (16.1.0 and 25.0.1) and 11/20 with conda-forge pyarrow 15
+# in a clean probe environment, so it is the host, not the packaging. The data written was
+# always correct; the process just died on the way out, which would fail Airflow tasks and
+# pytest runs at random. DuckDB replaces it: it writes true decimal128 Parquet, 0/20 crashes.
+# fastparquet was also rejected -- it silently downcasts Decimal to float64.
+#
+# Airflow itself is installed via requirements-airflow.txt against its constraints file,
+# not here, so pip cannot re-resolve its tree against conda's pyarrow/numpy.
+
+name: data_eng
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+
+  # --- data ---
+  - duckdb
+  - pandas=2.1.4
+  - numpy=1.26.4
+  - pyyaml
+
+  # --- databases ---
+  - psycopg2=2.9.12
+  - sqlalchemy=2.0.51
+
+  # --- http / api ---
+  - requests
+  - httpx
+
+  # --- notebooks ---
+  - jupyterlab
+  - notebook
+  - matplotlib
+
+  # --- quality ---
+  - pytest
+  - pytest-cov
+  - ruff
+  - mypy
+
+  - pip:
+      # Pinned to what is installed and verified working in this env.
+      - fastapi==0.136.3
+      - uvicorn==0.49.0
+      - pydantic==2.13.4
+      - pydantic-settings==2.14.2
+      - boto3==1.43.0
+      - redshift-connector==2.1.15
+      - sqlalchemy-redshift==0.8.14
+      - alembic==1.18.5
+      - python-dotenv==1.2.2
+      - tenacity==9.1.4
+      - moto[s3,dynamodb]
+      - types-PyYAML
+      # Airflow: install separately with its constraints file.
+      #   -r requirements-airflow.txt --constraint <airflow constraints url>

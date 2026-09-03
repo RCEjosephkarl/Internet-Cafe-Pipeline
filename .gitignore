@@ -1,2 +1,38 @@
+# --- secrets & keys (never commit) ---
+.env
+.env.*
+!.env.example
+*_pw.txt
+*.key
+*.pem
+credentials
+
+# --- python ---
 .venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- notebooks ---
+.ipynb_checkpoints/
+
+# --- generated data (raw-landing is tracked; everything derived is not) ---
+*.parquet
+work/
+quarantine/
+artifacts/
+
+# --- infra ---
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+
+# --- project docs not for the repo ---
 Project*.pdf

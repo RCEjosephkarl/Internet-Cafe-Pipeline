@@ -1,0 +1,4 @@
+{
+    "s3_bucket": "arn:aws:s3:::kcacao-deds-2026",
+    "name": "kcacao-deds-2026"
+}

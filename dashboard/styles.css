@@ -1,0 +1,121 @@
+/* AIMternet-Cafe operations dashboard.
+   Plain CSS, no build step, no framework - the spec asks for a minimal page (§7.4). */
+
+:root {
+  color-scheme: light dark;
+  --bg: #0f1216;
+  --panel: #171c22;
+  --panel-2: #1e242c;
+  --line: #2a323c;
+  --text: #e8edf2;
+  --muted: #93a1b0;
+  --accent: #4da3ff;
+  --ok: #3ddc84;
+  --warn: #ffb020;
+  --bad: #ff5c5c;
+  --radius: 10px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+header {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 18px 24px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+header h1 { font-size: 18px; margin: 0; letter-spacing: .2px; }
+header .sub { color: var(--muted); font-size: 13px; }
+header .spacer { flex: 1; }
+
+#status-pill {
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+#status-pill.ok   { color: var(--ok);   border-color: color-mix(in srgb, var(--ok) 40%, var(--line)); }
+#status-pill.bad  { color: var(--bad);  border-color: color-mix(in srgb, var(--bad) 40%, var(--line)); }
+
+main { padding: 20px 24px 48px; max-width: 1400px; margin: 0 auto; }
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 14px;
+  margin-bottom: 22px;
+}
+
+.tile {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+.tile .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .6px; }
+.tile .value { font-size: 26px; font-weight: 600; margin-top: 6px; font-variant-numeric: tabular-nums; }
+.tile .note  { color: var(--muted); font-size: 12px; margin-top: 4px; }
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 16px;
+}
+
+section.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+  overflow: hidden;
+}
+section.card h2 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: .6px;
+  color: var(--muted);
+  margin: 0 0 12px;
+}
+
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 500; font-size: 12px; }
+td.num, th.num { text-align: right; }
+.scroll { max-height: 340px; overflow: auto; }
+
+.bar { background: var(--panel-2); border-radius: 4px; height: 8px; overflow: hidden; }
+.bar > span { display: block; height: 100%; background: var(--accent); }
+
+.chip { padding: 2px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--line); }
+.chip.AVAILABLE { color: var(--ok); }
+.chip.OCCUPIED  { color: var(--warn); }
+.chip.MAINTENANCE { color: var(--bad); }
+
+.floor { display: grid; grid-template-columns: repeat(auto-fill, minmax(54px, 1fr)); gap: 5px; }
+.pc {
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 5px 2px;
+  text-align: center;
+  font-size: 10px;
+  color: var(--muted);
+  background: var(--panel-2);
+}
+.pc.OCCUPIED { background: color-mix(in srgb, var(--warn) 22%, var(--panel-2)); color: var(--text); }
+.pc.MAINTENANCE { background: color-mix(in srgb, var(--bad) 22%, var(--panel-2)); }
+
+.muted { color: var(--muted); }
+.err { color: var(--bad); font-size: 12px; }
+footer { color: var(--muted); font-size: 12px; padding: 0 24px 28px; max-width: 1400px; margin: 0 auto; }

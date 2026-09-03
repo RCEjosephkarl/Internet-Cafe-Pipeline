@@ -1,0 +1,101 @@
+# AIMternet-Cafe business rules of record.
+#
+# Recovered from the committed synthesizer bytecode (src/synthesizer/**/__pycache__/*.pyc),
+# cross-checked against the actual source rows in data/raw-landing/. This file plus
+# business_rules.py is the ONE place these live: the API, the transformations and the tests
+# all read from here. Do not duplicate a number from this file into code.
+#
+# Every monetary value is a string so it loads as Decimal, never float.
+
+currency: PHP
+timezone: Asia/Manila          # all source timestamps carry +08:00; stored UTC internally
+
+simulation_window:
+  start: 2026-07-01
+  end: 2026-08-31
+
+workstations:
+  total: 175
+  zones:
+    - name: Standard Zone
+      pc_range: [1, 100]
+      base_hourly_rate: "50.00"
+    - name: VIP Esports Zone
+      pc_range: [101, 150]
+      base_hourly_rate: "80.00"
+    - name: Streamer Pods
+      pc_range: [151, 175]
+      base_hourly_rate: "120.00"
+
+tiers:
+  - name: Standard
+    discount_pct: "0.00"
+    points_multiplier: "1.00"
+    upgrade_threshold: "3000.00"     # lifetime spend at which the member moves up
+    next_tier: Silver
+    upgrade_bonus_points: 50
+  - name: Silver
+    discount_pct: "0.10"
+    points_multiplier: "1.25"
+    upgrade_threshold: "10000.00"
+    next_tier: Gold
+    upgrade_bonus_points: 100
+  - name: Gold
+    discount_pct: "0.20"
+    points_multiplier: "1.50"
+    upgrade_threshold: null          # top tier
+    next_tier: null
+    upgrade_bonus_points: null
+
+points:
+  # 1 point per PHP 10 of net amount paid, times the tier multiplier, floored.
+  accrual_peso_per_point: "10.00"
+  # Redemption happens in whole 100-point units, each worth PHP 50.00 of credit.
+  redemption_unit_points: 100
+  redemption_unit_value: "50.00"
+
+# Rental pricing. THE ORDER MATTERS.
+#
+# NOTE — deviation from pipeline_plan_AWS.md §5. The spec says
+#     gross_rental_amount = base_hourly_rate x duration_hours
+# but both the synthesizer bytecode (rentals.cpython-312.pyc, line 215) and the data itself
+# compute gross from the DISCOUNTED rate. Verified against 4,531 sampled rentals: 1,684 of
+# them (~37%, every Silver and Gold row) contradict the spec and match the formula below.
+# The bytecode and the data are the rule of record; §5's line is a documentation error,
+# reported as a finding rather than silently accommodated.
+pricing:
+  money_quantum: "0.01"
+  formula:
+    - "final_hourly_rate   = base_hourly_rate * (1 - tier_discount_pct)   -> quantize"
+    - "gross_rental_amount = final_hourly_rate * duration_hours           -> quantize"
+    - "redeemable_units    = min(points_balance // 100, int(gross_rental_amount / 50.00))"
+    - "points_credit_value = redeemable_units * 50.00"
+    - "net_amount_paid     = gross_rental_amount - points_credit_value"
+    - "points_accrued      = floor(net_amount_paid / 10.00 * tier_points_multiplier)"
+
+session_durations_hours: ["1.0", "2.0", "3.0", "5.0", "8.0"]
+payment_methods: [Cash, GCash, Maya, Credit Card]
+client_os_version: Win11-Pro-AIM-Build104
+
+concession_categories: [Beverage, Hot Food, Snacks, Accessories]
+
+event_types: [SESSION_START, SESSION_END, HARDWARE_ALERT, PERIPHERAL_ALERT]
+telemetry_statuses: [IDLE, OCCUPIED]
+ledger_transaction_types: [RENTAL_ACCRUAL, CONCESSION_ACCRUAL, RENTAL_REDEMPTION, TIER_BONUS]
+
+ph_holidays_2026:
+  "2026-08-21": Ninoy Aquino Day
+  "2026-08-31": National Heroes Day
+
+# Telemetry TTL. Source records carry expires_at = timestamp + 7 days, and the simulated
+# window is already in the past, so enabling DynamoDB TTL on it would purge almost the whole
+# dataset within ~48h of loading. See AIMTERNET_DDB_TTL_ENABLED in .env.example.
+telemetry:
+  # The sampling interval is NOT constant, despite what spec §1.2 implies (finding F6):
+  # 2026-07-01..2026-08-24 sample every 300s (2,100 records per hourly file), and
+  # 2026-08-25..2026-08-31 sample every 30s (21,000 per file). Real total: 6,300,000
+  # records, not the ~3,124,800 the spec projects from a uniform tick.
+  tick_seconds_default: 300
+  tick_seconds_observed: [300, 30]
+  total_records: 6300000
+  ttl_days: 7
