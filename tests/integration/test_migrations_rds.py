@@ -8,16 +8,42 @@ pytestmark = pytest.mark.rds
 
 
 def test_migrations_apply_rollback_and_reapply() -> None:
-    from aimternet.db.migrate import downgrade, status, upgrade
+    """Exercise the full up/down/up cycle in a scratch schema, never the live one.
 
-    upgrade()
-    assert all(row["applied"] for row in status())
+    An earlier version of this test ran against the configured schema. It rolled back
+    load_checkpoint while a DynamoDB load was running in another process, and the loader --
+    which had already written millions of items - lost every checkpoint it tried to record.
+    A rollback test is destructive by definition, so it gets its own namespace and drops it
+    afterwards.
+    """
+    import uuid
 
-    reverted = downgrade(steps=2)
-    assert len(reverted) == 2
+    from aimternet.db.migrate import applied_versions, discover_migrations, downgrade, upgrade
+    from aimternet.db.session import connection
 
-    reapplied = upgrade()
-    assert len(reapplied) == 2
+    scratch = f"aimternet_migrate_test_{uuid.uuid4().hex[:8]}"
+    total = len(discover_migrations())
+    try:
+        applied = upgrade(schema=scratch)
+        assert len(applied) == total
+        assert len(applied_versions(scratch)) == total
+
+        reverted = downgrade(steps=2, schema=scratch)
+        assert len(reverted) == 2
+        assert len(applied_versions(scratch)) == total - 2
+
+        reapplied = upgrade(schema=scratch)
+        assert len(reapplied) == 2
+        assert len(applied_versions(scratch)) == total
+    finally:
+        with connection() as conn, conn.cursor() as cur:
+            cur.execute(f'DROP SCHEMA IF EXISTS "{scratch}" CASCADE')
+
+
+def test_the_live_schema_is_fully_migrated() -> None:
+    """Non-destructive counterpart: the configured schema is up to date."""
+    from aimternet.db.migrate import status
+
     assert all(row["applied"] for row in status())
 
 

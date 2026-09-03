@@ -16,6 +16,11 @@ include = ["aimternet*"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-q --strict-markers"
+filterwarnings = [
+    # starlette's TestClient warns about httpx; nothing in this repo can act on it.
+    "ignore:Using `httpx` with `starlette.testclient`:DeprecationWarning",
+    "ignore:Using `httpx` with `starlette.testclient`",
+]
 markers = [
     "aws: needs live AWS credentials and resources",
     "rds: needs a reachable PostgreSQL instance",
