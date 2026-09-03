@@ -13,7 +13,7 @@ AIRFLOW_HOME  ?= $(HOME)/airflow
 
 export PYTHONPATH := $(REPO_ROOT)/src
 
-.PHONY: help env link test lint typecheck check migrate assumptions validate manifest bronze \
+.PHONY: help env link test lint typecheck check migrate assumptions validate quarantine-demo manifest bronze \
         bootstrap load-rds load-dynamodb curate redshift \
         reconcile api metrics airflow dashboard clean
 
@@ -64,6 +64,9 @@ assumptions: ## Show every POC policy decision and its evidence
 validate: ## Stage C only: validate all 62 batches locally, no AWS needed
 	$(PY) -m aimternet.pipeline.cli validate
 
+quarantine-demo: ## Prove the reject path: inject defects into a temp copy and validate it
+	$(PY) scripts/quarantine_demo.py
+
 manifest: ## Stage A: inventory and checksum every source file
 	$(PY) -m aimternet.pipeline.cli manifest --register
 
@@ -82,7 +85,7 @@ load-dynamodb: ## Create DynamoDB tables and load events + telemetry
 curate: ## Silver + RDS export + Gold Parquet
 	$(PY) -m aimternet.pipeline.cli curate
 
-redshift: ## Redshift DDL + COPY/MERGE
+redshift: ## Redshift DDL + load Gold (COPY when available, else batched INSERT)
 	$(PY) -m aimternet.pipeline.cli load-redshift
 
 reconcile: ## Cross-layer reconciliation report

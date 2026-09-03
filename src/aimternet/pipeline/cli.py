@@ -90,18 +90,29 @@ def _cmd_assumptions(args: argparse.Namespace) -> int:
 def _cmd_validate(args: argparse.Namespace) -> int:
     """Stage C on the local landing tree. Needs no AWS, which is the point."""
     from aimternet.pipeline.validation.engine import Validator
-    from aimternet.pipeline.validation.quarantine import write_local
+    from aimternet.pipeline.validation.quarantine import publish, write_local
 
     cfg = settings()
-    validator = Validator(cfg.raw_landing)
+    landing = Path(args.landing) if args.landing else cfg.raw_landing
+    validator = Validator(landing, run_id=args.run_id)
     result = validator.run(telemetry_days=args.telemetry_days)
     print(result.summary_table())
 
-    written = write_local(result)
-    print(f"\nquarantine: {written['_summary'].parent}")
+    if args.no_publish:
+        written = write_local(result)
+        print(f"\nquarantine: {written['_summary'].parent}")
+    else:
+        published = publish(result)
+        print(f"\nquarantine     : {published['local_dir']}")
+        print(f"records rejected: {published['records_rejected']}")
+        uris = published["s3_uris"]
+        if isinstance(uris, list):
+            for uri in uris:
+                print(f"published       : {uri}")
+
     if args.json_out:
         path = result.write_json(Path(args.json_out))
-        print(f"results   : {path}")
+        print(f"results         : {path}")
     return 0 if result.passed else 1
 
 
@@ -171,6 +182,13 @@ def _cmd_load_dynamodb(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_load_redshift(args: argparse.Namespace) -> int:
+    from aimternet.pipeline.loaders.redshift import load_all
+
+    print(load_all(run_id=args.run_id or "", datasets=args.datasets).summary())
+    return 0
+
+
 def _cmd_curate(args: argparse.Namespace) -> int:
     """Silver, then the RDS export, then Gold. Order matters: Gold reads both."""
     from aimternet.pipeline.curate import export_rds, gold, silver
@@ -185,6 +203,48 @@ def _cmd_curate(args: argparse.Namespace) -> int:
     if args.layer in ("gold", "all"):
         print(gold.build(run_id).summary())
     return 0
+
+
+def _cmd_reconcile(args: argparse.Namespace) -> int:
+    """Compare every hop and write the report. Exits non-zero on a critical failure."""
+    from aimternet.pipeline.reconcile import persist, reconcile
+
+    report = reconcile(
+        run_id=args.run_id or "", include_redshift=not args.skip_redshift
+    )
+    written = persist(report)
+
+    print(report.to_markdown() if args.markdown else _reconcile_summary(report))
+    print(f"\nreport : {written['markdown']}")
+    print(f"json   : {written['json']}")
+    return 0 if report.passed else 1
+
+
+def _reconcile_summary(report: object) -> str:
+    lines = [
+        f"reconciliation {report.run_id} — "  # type: ignore[attr-defined]
+        f"{'PASSED' if report.passed else 'FAILED'}",  # type: ignore[attr-defined]
+        "",
+        f"  {'check':44s} {'expected':>12s} {'actual':>12s}  ok",
+        f"  {'-' * 44} {'-' * 12} {'-' * 12}  --",
+    ]
+    for check in report.checks:  # type: ignore[attr-defined]
+        if check.layer_from and check.layer_to:
+            expected = "" if check.expected is None else f"{int(check.expected):,}"
+            actual = "" if check.actual is None else f"{int(check.actual):,}"
+            lines.append(
+                f"  {check.name:44s} {expected:>12s} {actual:>12s}  "
+                f"{'ok' if check.passed else 'NO'}"
+            )
+    lines += ["", "  integrity:"]
+    for check in report.checks:  # type: ignore[attr-defined]
+        if not (check.layer_from and check.layer_to):
+            lines.append(
+                f"    [{'ok' if check.passed else check.severity[:4]}] {check.name}"
+            )
+    if report.skipped_layers:  # type: ignore[attr-defined]
+        lines += ["", "  not reachable: " + ", ".join(report.skipped_layers)]  # type: ignore[attr-defined]
+    return "\n".join(lines)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -208,6 +268,9 @@ def build_parser() -> argparse.ArgumentParser:
     validate_p.add_argument("--telemetry-days", type=int, default=None,
                             help="limit telemetry to the first N days (default: all 62)")
     validate_p.add_argument("--json-out", default=None, help="write results JSON here")
+    validate_p.add_argument("--landing", default=None, help="validate a different tree")
+    validate_p.add_argument("--run-id", default=None, help="name this run in the artifacts")
+    validate_p.add_argument("--no-publish", action="store_true", help="skip the S3 upload")
     validate_p.set_defaults(func=_cmd_validate)
 
     manifest_p = sub.add_parser("manifest", help="Stage A: inventory and checksum source files")
@@ -245,6 +308,17 @@ def build_parser() -> argparse.ArgumentParser:
     curate_p.add_argument("--full", action="store_true", help="full RDS export, not incremental")
     curate_p.add_argument("--run-id", default=None)
     curate_p.set_defaults(func=_cmd_curate)
+
+    redshift_p = sub.add_parser("load-redshift", help="apply the DDL and load Gold into Redshift")
+    redshift_p.add_argument("--run-id", default=None)
+    redshift_p.add_argument("--datasets", nargs="*", default=None)
+    redshift_p.set_defaults(func=_cmd_load_redshift)
+
+    reconcile_p = sub.add_parser("reconcile", help="compare counts across every hop")
+    reconcile_p.add_argument("--run-id", default=None)
+    reconcile_p.add_argument("--skip-redshift", action="store_true")
+    reconcile_p.add_argument("--markdown", action="store_true", help="print the full report")
+    reconcile_p.set_defaults(func=_cmd_reconcile)
 
     return parser
 

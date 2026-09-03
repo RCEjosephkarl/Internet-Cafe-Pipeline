@@ -77,7 +77,12 @@ def write_local(result: ValidationResult, quarantine_dir: Path | None = None) ->
 
 
 def upload(written: dict[str, Path], run_id: str) -> list[str]:
-    """Mirror the local quarantine to S3. Returns the URIs written."""
+    """Mirror the local quarantine to S3. Returns the URIs written.
+
+    The summary is uploaded even when nothing was rejected. A quarantine prefix that is
+    simply absent is ambiguous -- it cannot be told apart from a run that never happened --
+    whereas a summary saying "0 rejected, here is what was checked" is a real answer.
+    """
     from aimternet.io.s3 import S3Client
 
     cfg = settings()
@@ -87,3 +92,33 @@ def upload(written: dict[str, Path], run_id: str) -> list[str]:
         key = f"{cfg.s3_quarantine_prefix}/run_id={run_id}/{dataset}{path.suffix}"
         uris.append(client.upload_file(path, key))
     return uris
+
+
+def publish(result: ValidationResult, quarantine_dir: Path | None = None) -> dict[str, object]:
+    """Write the quarantine locally, publish it and the full validation results to S3.
+
+    Called at the end of every validation run so the quarantine location and the results are
+    both populated and readable (acceptance item 4), whether or not anything was rejected.
+    """
+    written = write_local(result, quarantine_dir)
+    results_path = written["_summary"].parent / "validation_results.json"
+    result.write_json(results_path)
+    written["_results"] = results_path
+
+    published: list[str] = []
+    try:
+        published = upload(written, result.run_id)
+    except Exception as exc:
+        log.warning("could not publish the quarantine to S3: %s", exc)
+
+    rejected = sum(
+        1 for finding in result.findings if finding.severity is Severity.ERROR
+    )
+    return {
+        "local_dir": str(written["_summary"].parent),
+        "s3_uris": published,
+        "records_rejected": rejected,
+        "datasets_with_rejects": sorted(
+            {k for k in written if not k.startswith("_")}
+        ),
+    }

@@ -203,10 +203,34 @@ def _bronze_counts() -> dict[str, int]:
     return counts
 
 
-def _rds_counts() -> dict[str, int]:
-    from aimternet.pipeline.loaders.rds import table_counts
+#: Rows the API created. They are real business, not drift, and must not be compared against
+#: the source files -- a POS that never adds a row is a POS nobody is using.
+API_RUN_ID = "api"
 
-    return table_counts()
+
+def _rds_counts() -> tuple[dict[str, int], dict[str, int]]:
+    """(rows loaded from the source files, rows created by the API), per table.
+
+    Comparing a live operational store against the source files only makes sense for the
+    rows that came from those files. Splitting on the lineage ``run_id`` keeps the
+    bootstrap check exact while letting the business carry on.
+    """
+    from aimternet.db.session import fetch_all
+    from aimternet.pipeline.loaders.rds import LOAD_ORDER
+
+    bootstrap: dict[str, int] = {}
+    operational: dict[str, int] = {}
+    for table in LOAD_ORDER:
+        rows = fetch_all(
+            f"""SELECT
+                    count(*) FILTER (WHERE run_id IS DISTINCT FROM %s) AS bootstrap,
+                    count(*) FILTER (WHERE run_id = %s)                AS operational
+                FROM {table}""",
+            (API_RUN_ID, API_RUN_ID),
+        )
+        bootstrap[table] = int(rows[0]["bootstrap"])
+        operational[table] = int(rows[0]["operational"])
+    return bootstrap, operational
 
 
 def _silver_gold_counts() -> tuple[dict[str, int], dict[str, int]]:
@@ -271,11 +295,14 @@ def _rds_integrity(report: ReconciliationReport) -> None:
         ("rentals_ending_before_start", SEVERITY_CRITICAL,
          "SELECT count(*) AS n FROM rental_transactions "
          "WHERE session_end_utc < session_start_utc", "session_end must not precede start"),
-        ("timestamps_outside_window", SEVERITY_WARNING,
-         "SELECT count(*) AS n FROM rental_transactions WHERE session_start_utc < "
+        # Only bootstrap rows are held to the simulation window. A rental the POS creates
+        # today is correctly outside it -- that is the system being used, not data drift.
+        ("timestamps_outside_window", SEVERITY_CRITICAL,
+         "SELECT count(*) AS n FROM rental_transactions "
+         "WHERE run_id IS DISTINCT FROM 'api' AND (session_start_utc < "
          "'2026-06-30T16:00:00+00'::timestamptz OR session_start_utc > "
-         "'2026-09-01T00:00:00+00'::timestamptz",
-         "rentals outside 2026-07-01..2026-08-31 Manila time"),
+         "'2026-09-01T00:00:00+00'::timestamptz)",
+         "bootstrap-loaded rentals must fall inside 2026-07-01..2026-08-31 Manila time"),
         ("overlapping_active_rentals", SEVERITY_CRITICAL,
          "SELECT count(*) AS n FROM (SELECT workstation_id FROM rental_transactions "
          "WHERE session_end_utc IS NULL GROUP BY 1 HAVING count(*) > 1) d",
@@ -396,8 +423,8 @@ def reconcile(run_id: str = "", *, include_redshift: bool = True) -> Reconciliat
 
     # ---- source -> RDS
     try:
-        rds = _rds_counts()
-        for table, actual in rds.items():
+        bootstrap, operational = _rds_counts()
+        for table, actual in bootstrap.items():
             expected = SOURCE_COUNTS.get(table, 0)
             if table == "members":
                 expected += EXPECTED_ORPHAN_MEMBER_COUNT  # D2 backfill is expected, not drift
@@ -407,7 +434,23 @@ def reconcile(run_id: str = "", *, include_redshift: bool = True) -> Reconciliat
                     expected=expected, actual=actual, passed=actual == expected,
                     detail=(
                         "360 source members plus the 840 D2 backfills"
-                        if table == "members" else "row count must match source"
+                        if table == "members"
+                        else "rows loaded from the source files must match it exactly"
+                    ),
+                )
+            )
+        created = sum(operational.values())
+        if created:
+            report.add(
+                Check(
+                    name="rds_rows:created_by_the_api", layer_from="", layer_to="",
+                    expected=None, actual=created, passed=True, severity=SEVERITY_INFO,
+                    detail=(
+                        "rows the POS created since the bootstrap, counted separately from "
+                        "the source comparison: "
+                        + ", ".join(
+                            f"{table} +{n}" for table, n in operational.items() if n
+                        )
                     ),
                 )
             )
