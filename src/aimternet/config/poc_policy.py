@@ -110,6 +110,63 @@ ASSUMPTIONS: Final[tuple[Assumption, ...]] = (
         spec_reference="§4, §6.3, §10.6",
     ),
     Assumption(
+        key="F5_LEDGER_BALANCE_NOT_REPLAYABLE",
+        decision=(
+            "points_delta is treated as authoritative and balances are derived by summing it. "
+            "member_points_ledger.resulting_balance is carried through as a source column but "
+            "never used to compute anything."
+        ),
+        rationale=(
+            "One of the two columns has to be trusted and they disagree. The deltas reconcile "
+            "perfectly against the transactions that caused them; the balances do not "
+            "reconstruct under any ordering."
+        ),
+        evidence=(
+            "All 54,424 ledger entries that reference a transaction match it exactly "
+            "(28,157 rental accruals, 21,077 concession accruals, 5,190 redemptions; zero "
+            "mismatches). Replaying deltas in created_at order reproduces resulting_balance "
+            "for only 5 of 1,183 members -- the generator maintained balances across "
+            "interleaved rental and concession passes, so the recorded sequence cannot be "
+            "replayed in timestamp order."
+        ),
+        spec_reference="§4, §6.6",
+    ),
+    Assumption(
+        key="F6_TELEMETRY_CADENCE_VARIES",
+        decision=(
+            "Telemetry volume is taken from the data (6,300,000 records), not from spec §1.2's "
+            "projection of ~3,124,800. All cost, runtime and capacity estimates use the real "
+            "figure."
+        ),
+        rationale=(
+            "The spec projects the total from a uniform 5-minute tick. The tick is not "
+            "uniform, so the projection is low by roughly half -- which would have understated "
+            "the DynamoDB load by about 3.2M writes."
+        ),
+        evidence=(
+            "1,320 files hold 2,100 records (300s tick, 2026-07-01..08-24); 168 files hold "
+            "21,000 (30s tick, 2026-08-25..08-31). 1,320x2,100 + 168x21,000 = 6,300,000."
+        ),
+        spec_reference="§1.2, §6.3",
+    ),
+    Assumption(
+        key="F4_ALERT_EVENTS_ARE_FULLY_POPULATED",
+        decision=(
+            "WorkstationEvent keeps session_id and member_id optional even though every alert "
+            "event in this dataset populates them."
+        ),
+        rationale=(
+            "The stated contract permits null, tolerating it costs nothing, and a loader that "
+            "crashes on a null the contract allows is worse than one that accepts a value the "
+            "contract did not promise."
+        ),
+        evidence=(
+            "Spec §4 says alert events have session_id/member_id unset. All 1,644 alert events "
+            "across the 62 batches (1,101 HARDWARE_ALERT, 543 PERIPHERAL_ALERT) carry both."
+        ),
+        spec_reference="§4",
+    ),
+    Assumption(
         key="DUCKDB_REPLACES_PYARROW",
         decision="Parquet is written and read with DuckDB. pyarrow is not installed.",
         rationale=(

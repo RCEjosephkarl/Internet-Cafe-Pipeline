@@ -13,7 +13,8 @@ AIRFLOW_HOME  ?= $(HOME)/airflow
 
 export PYTHONPATH := $(REPO_ROOT)/src
 
-.PHONY: help env link test lint typecheck check migrate assumptions validate bootstrap curate redshift \
+.PHONY: help env link test lint typecheck check migrate assumptions validate manifest bronze \
+        bootstrap curate redshift \
         reconcile api metrics airflow dashboard clean
 
 help:
@@ -62,6 +63,12 @@ assumptions: ## Show every POC policy decision and its evidence
 
 validate: ## Stage C only: validate all 62 batches locally, no AWS needed
 	$(PY) -m aimternet.pipeline.cli validate
+
+manifest: ## Stage A: inventory and checksum every source file
+	$(PY) -m aimternet.pipeline.cli manifest --register
+
+bronze: ## Stages A+B: inventory then copy the landing tree into S3 Bronze
+	$(PY) -m aimternet.pipeline.cli bronze --verify
 
 bootstrap: ## Full bootstrap: manifest -> Bronze -> validate -> RDS -> DynamoDB
 	$(PY) -m aimternet.pipeline.cli bootstrap

@@ -134,7 +134,8 @@ class BusinessRules:
         self.telemetry_statuses: frozenset[str] = frozenset(raw["telemetry_statuses"])
         self.ledger_transaction_types: frozenset[str] = frozenset(raw["ledger_transaction_types"])
         self.ph_holidays: dict[str, str] = {str(k): v for k, v in raw["ph_holidays_2026"].items()}
-        self.telemetry_tick_seconds: int = int(raw["telemetry"]["tick_seconds"])
+        self.telemetry_tick_seconds: int = int(raw["telemetry"]["tick_seconds_default"])
+        self.telemetry_total_records: int = int(raw["telemetry"]["total_records"])
         self.telemetry_ttl_days: int = int(raw["telemetry"]["ttl_days"])
 
     # ---------------------------------------------------------------- money helpers

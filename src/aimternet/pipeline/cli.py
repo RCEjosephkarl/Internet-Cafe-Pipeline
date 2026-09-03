@@ -13,7 +13,9 @@ import argparse
 import json
 import logging
 import sys
+import uuid
 from collections.abc import Sequence
+from pathlib import Path
 
 from aimternet.config.poc_policy import policy
 from aimternet.config.settings import settings
@@ -85,6 +87,70 @@ def _cmd_assumptions(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_validate(args: argparse.Namespace) -> int:
+    """Stage C on the local landing tree. Needs no AWS, which is the point."""
+    from aimternet.pipeline.validation.engine import Validator
+    from aimternet.pipeline.validation.quarantine import write_local
+
+    cfg = settings()
+    validator = Validator(cfg.raw_landing)
+    result = validator.run(telemetry_days=args.telemetry_days)
+    print(result.summary_table())
+
+    written = write_local(result)
+    print(f"\nquarantine: {written['_summary'].parent}")
+    if args.json_out:
+        path = result.write_json(Path(args.json_out))
+        print(f"results   : {path}")
+    return 0 if result.passed else 1
+
+
+def _cmd_manifest(args: argparse.Namespace) -> int:
+    """Stage A only: inventory and checksum, register nothing unless asked."""
+    from aimternet.pipeline.manifest import build_manifest, register, summarise, write_to_s3
+
+    cfg = settings()
+    run_id = args.run_id or f"manifest-{uuid.uuid4().hex[:12]}"
+    entries = build_manifest(cfg.raw_landing, run_id=run_id, telemetry_days=args.telemetry_days)
+    print(summarise(entries))
+    if args.register:
+        print("\nregistered:", register(entries))
+        print("s3 manifest:", write_to_s3(entries, run_id))
+    return 0
+
+
+def _cmd_bronze(args: argparse.Namespace) -> int:
+    """Stages A and B: inventory, then copy into S3 Bronze."""
+    from aimternet.pipeline.bronze import upload_bronze, verify_bronze
+    from aimternet.pipeline.manifest import (
+        build_manifest,
+        register,
+        set_status,
+        summarise,
+        write_to_s3,
+    )
+
+    cfg = settings()
+    run_id = args.run_id or f"bronze-{uuid.uuid4().hex[:12]}"
+    entries = build_manifest(cfg.raw_landing, run_id=run_id, telemetry_days=args.telemetry_days)
+    print(summarise(entries))
+    register(entries)
+
+    result = upload_bronze(entries, threads=args.threads)
+    result.manifest_uri = write_to_s3(entries, run_id)
+    print("\nbronze upload:")
+    print(result.summary())
+
+    uploaded = [e.checksum for e in entries if e.bronze_key not in dict(result.outcome.failed)]
+    set_status(uploaded, "UPLOADED")
+
+    if args.verify:
+        verification = verify_bronze(entries, sample=args.verify_sample)
+        print("\nverification:", json.dumps(verification, indent=2)[:1200])
+        return 0 if verification["verified"] else 1
+    return 1 if result.outcome.failed else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aimternet", description=__doc__)
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
@@ -101,6 +167,27 @@ def build_parser() -> argparse.ArgumentParser:
     assumptions_p = sub.add_parser("assumptions", help="show every POC policy decision")
     assumptions_p.add_argument("--json", action="store_true")
     assumptions_p.set_defaults(func=_cmd_assumptions)
+
+    validate_p = sub.add_parser("validate", help="Stage C: validate the landing tree (no AWS)")
+    validate_p.add_argument("--telemetry-days", type=int, default=None,
+                            help="limit telemetry to the first N days (default: all 62)")
+    validate_p.add_argument("--json-out", default=None, help="write results JSON here")
+    validate_p.set_defaults(func=_cmd_validate)
+
+    manifest_p = sub.add_parser("manifest", help="Stage A: inventory and checksum source files")
+    manifest_p.add_argument("--telemetry-days", type=int, default=None)
+    manifest_p.add_argument("--run-id", default=None)
+    manifest_p.add_argument("--register", action="store_true", help="write to the control table")
+    manifest_p.set_defaults(func=_cmd_manifest)
+
+    bronze_p = sub.add_parser("bronze", help="Stages A+B: inventory then copy to S3 Bronze")
+    bronze_p.add_argument("--telemetry-days", type=int, default=None)
+    bronze_p.add_argument("--run-id", default=None)
+    bronze_p.add_argument("--threads", type=int, default=None)
+    bronze_p.add_argument("--verify", action="store_true", help="check Bronze against the manifest")
+    bronze_p.add_argument("--verify-sample", type=int, default=200,
+                          help="how many objects to checksum-verify (default 200)")
+    bronze_p.set_defaults(func=_cmd_bronze)
 
     return parser
 

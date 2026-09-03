@@ -91,5 +91,11 @@ ph_holidays_2026:
 # window is already in the past, so enabling DynamoDB TTL on it would purge almost the whole
 # dataset within ~48h of loading. See AIMTERNET_DDB_TTL_ENABLED in .env.example.
 telemetry:
-  tick_seconds: 300
+  # The sampling interval is NOT constant, despite what spec §1.2 implies (finding F6):
+  # 2026-07-01..2026-08-24 sample every 300s (2,100 records per hourly file), and
+  # 2026-08-25..2026-08-31 sample every 30s (21,000 per file). Real total: 6,300,000
+  # records, not the ~3,124,800 the spec projects from a uniform tick.
+  tick_seconds_default: 300
+  tick_seconds_observed: [300, 30]
+  total_records: 6300000
   ttl_days: 7

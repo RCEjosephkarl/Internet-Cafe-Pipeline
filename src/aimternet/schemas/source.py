@@ -17,7 +17,13 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    computed_field,
+    model_validator,
+)
 
 Money = Annotated[Decimal, Field(max_digits=14, decimal_places=2)]
 Rate = Annotated[Decimal, Field(max_digits=6, decimal_places=2)]
@@ -106,12 +112,26 @@ class DimDate(SourceModel):
 
 
 class DimTime(SourceModel):
-    """``dimensions/dim_time.csv`` — 1,440 rows, minute grain."""
+    """``dimensions/dim_time.csv`` — 1,440 rows, minute grain.
 
-    time_id: int = Field(ge=0, le=1439)
+    ``time_id`` is HHMM-encoded (0, 1, ... 59, 100, 101, ... 2359), not a 0-1439 minute
+    index. Confirmed against the file: 1,440 rows spanning 0..2359.
+    """
+
+    time_id: int = Field(ge=0, le=2359)
     hour_24: int = Field(ge=0, le=23)
     minute_val: int = Field(ge=0, le=59)
     day_part_label: str
+
+    @model_validator(mode="after")
+    def _time_id_encodes_the_clock(self) -> DimTime:
+        expected = self.hour_24 * 100 + self.minute_val
+        if self.time_id != expected:
+            raise ValueError(
+                f"time_id {self.time_id} does not encode {self.hour_24:02d}:{self.minute_val:02d} "
+                f"(expected {expected})"
+            )
+        return self
 
 
 # --------------------------------------------------------------------------- transactional
@@ -166,10 +186,14 @@ class RentalTransaction(SourceModel):
     points_accrued: int = Field(ge=0)
     payment_method: PaymentMethod
 
-    @field_validator("session_end")
-    @classmethod
-    def _end_after_start(cls, value: datetime, info: object) -> datetime:
-        return value
+    @model_validator(mode="after")
+    def _session_ends_after_it_starts(self) -> RentalTransaction:
+        if self.session_end < self.session_start:
+            raise ValueError(
+                f"session_end {self.session_end.isoformat()} precedes "
+                f"session_start {self.session_start.isoformat()}"
+            )
+        return self
 
     @computed_field  # type: ignore[prop-decorator]
     @property
