@@ -57,11 +57,23 @@ in 0.2 s at 159 MB peak RSS. If you reintroduce pyarrow, re-run the stress test 
    `aws dynamodb delete-table`. Terraform in `infra/` manages *only* S3 config and the two DynamoDB
    tables — the pre-existing RDS and Redshift are deliberately out of its reach.
 8. **Airflow DAG files stay thin.** They import and call `src/aimternet/`; no business logic in `dags/`.
-9. **The RDS→S3 export leaves a snapshot, never a delta.** Gold reads
-   `silver/<table>_operational/` as the *current* state of the operational store, so an
-   incremental run merges its delta onto the previous snapshot by primary key before writing.
-   `tests/unit/test_export_rds_merge.py` pins this; reconciliation checks it directly
-   (`silver_snapshot:*`).
+9. **Every incremental export leaves a snapshot, never a delta — and something must read
+   it.** Gold reads `silver/<dataset>_operational/` as the *current* state of its source, so
+   an incremental run merges its delta onto the previous snapshot by primary key before
+   writing. One implementation: `curate/engine.py::merge_onto_snapshot`, used by both
+   `export_rds` and `export_dynamodb`. Use `NOT EXISTS`, never `NOT IN` — one NULL key in the
+   delta makes `NOT IN` discard the entire previous snapshot.
+   `tests/unit/test_export_rds_merge.py` and `test_export_dynamodb_merge.py` pin the merge;
+   reconciliation checks the result (`silver_snapshot:*`, CRITICAL).
+
+   The second half is not optional. This invariant named only the RDS export for one phase,
+   and `export_dynamodb` — which imports that module's watermark helpers — wrote its delta
+   over `workstation_events_operational` hourly for its whole life. Nothing failed, because
+   **no query read the dataset**: a snapshot nobody reads cannot be observed to be wrong.
+   `tests/unit/test_operational_snapshots_are_consumed.py` now requires every snapshot to be
+   read by Gold or declared unread with a reason. Four still are — `rental_transactions`,
+   `concession_purchases`, `workstations`, `concession_items` — so POS rentals and purchases
+   do not yet reach the warehouse. That gap is declared, not hidden.
 10. **Terraform configures; it does not own.** `infra/` has no `aws_s3_bucket` resource (the
     bucket is a data source), the two DynamoDB tables carry `prevent_destroy`, and RDS and
     Redshift are absent entirely. `tests/unit/test_infra_terraform.py` enforces all three.
@@ -85,6 +97,22 @@ in 0.2 s at 159 MB peak RSS. If you reintroduce pyarrow, re-run the stress test 
   1,200 rows to 4 and `dim_member` from 2,235 SCD2 versions to 8, and nothing failed:
   reconciliation rated the dimension check `INFO`. Fixed in `curate/export_rds.py` (merge on
   the primary key) and the check is now `CRITICAL`, alongside a per-snapshot count check.
+- **F8** — F7 again, in the sibling module, plus the three reasons nobody saw it.
+  `dynamodb_to_s3_incremental` (hourly) wrote its delta over
+  `silver/workstation_events_operational`, so the snapshot held one hour of API-emitted events
+  and nothing older. It survived because **nothing read the dataset** (Gold built
+  `fact_workstation_event` from Bronze alone), **no check covered it** (`OPERATIONAL_SNAPSHOTS`
+  listed only the five RDS tables), and **no test existed**. Fixed in
+  `curate/export_dynamodb.py`; Gold now unions both origins; the snapshot is held to a
+  never-shrinks high-water mark read from `reconciliation_results`.
+
+  Found alongside it, same class, also fixed: Redshift merged `dim_member` on `member_key`, a
+  `row_number()` Gold recomputes every build — a shrink left stale rows behind with the count
+  unchanged (now keyed on `(member_id, valid_from_utc)`); `dim_member` was the one table
+  missing from the Redshift expectations dict, so its count check was `INFO` and always passed;
+  and `ReconciliationReport.passed` ignored `skipped_layers`, so any layer that threw removed
+  all of its `CRITICAL` checks and the run went green. See `docs/runbook.md` for the one-time
+  `dim_member` cleanup this requires.
 
 ## Commands
 

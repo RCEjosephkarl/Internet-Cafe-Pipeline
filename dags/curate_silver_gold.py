@@ -37,16 +37,28 @@ def curate_silver_gold():
         from aimternet.pipeline.curate.gold import build
 
         report = build(context["run_id"])
-        return {"rows": report.rows, "seconds": round(report.duration_seconds, 1)}
+        return {
+            "rows": report.rows,
+            "operational": report.operational_rows,
+            "seconds": round(report.duration_seconds, 1),
+        }
 
     @task
     def check_counts(silver: dict, gold: dict) -> str:
         """Fail the run if Gold lost rows Silver had — the point of curating is not to."""
+        # Derived, never a constant. fact_workstation_event draws on two sources: the Bronze
+        # events in Silver and the API-emitted ones the DynamoDB export leaves alongside them.
+        # Comparing it against Bronze alone would fail every run in which the POS was used —
+        # and, before it did that, hid the fact that those events never arrived at all.
+        operational = gold.get("operational", {})
         expected = {
             "fact_rental": silver["rows"].get("rental_transactions", 0),
             "fact_concession_sale": silver["rows"].get("concession_purchases", 0),
             "fact_points_activity": silver["rows"].get("member_points_ledger", 0),
-            "fact_workstation_event": silver["rows"].get("workstation_events", 0),
+            "fact_workstation_event": (
+                silver["rows"].get("workstation_events", 0)
+                + operational.get("workstation_events_operational", 0)
+            ),
         }
         mismatched = {
             table: (count, gold["rows"].get(table))

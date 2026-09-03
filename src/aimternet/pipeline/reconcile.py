@@ -97,7 +97,17 @@ class ReconciliationReport:
 
     @property
     def passed(self) -> bool:
-        return not self.critical_failures
+        """A run passes only if every critical check ran *and* passed.
+
+        A skipped layer used not to count. That made every guarantee in this file
+        conditional on nothing having gone wrong on the way to checking it: one S3 blip in
+        `_silver_gold_counts` removed all eleven `silver_rows:*` checks, every `gold_rows:*`
+        check, the `gold_rows:dim_member` F7 guard and every CRITICAL `silver_snapshot:*`
+        check at once -- and the report went green, because a check that was never added
+        cannot fail. "We could not look" is not the same answer as "we looked and it was
+        fine", and only one of them should let a DAG proceed.
+        """
+        return not self.critical_failures and not self.skipped_layers
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -245,11 +255,35 @@ OPERATIONAL_SNAPSHOTS = {
     "concession_purchases_operational": "concession_purchases",
 }
 
+#: The DynamoDB export's equivalent. It has no RDS table to be compared against -- the events
+#: it holds exist only in DynamoDB and in this file -- so the check that guards it is that it
+#: never shrinks. It was written by the delta rather than the snapshot for its whole life
+#: before that check existed, losing every event older than one hour on every run.
+EVENTS_SNAPSHOT = "workstation_events_operational"
+
+
+def _high_water_mark(check_name: str) -> int:
+    """The largest ``actual`` this check has ever recorded.
+
+    Every check is already persisted to ``reconciliation_results``, so a snapshot that has no
+    table to be compared against can still be held to the one property that matters: it must
+    never be smaller than it has been. No new control table, no migration -- just a read of
+    what earlier runs wrote.
+    """
+    from aimternet.db.session import fetch_all
+
+    rows = fetch_all(
+        "SELECT max(actual_value) AS high FROM reconciliation_results WHERE check_name = %s",
+        (check_name,),
+    )
+    high = rows[0]["high"] if rows else None
+    return int(high) if high is not None else 0
+
 
 def _silver_gold_counts() -> tuple[dict[str, int], dict[str, int]]:
     from aimternet.pipeline.curate.engine import count_parquet, duck, layer_uri
 
-    silver_names = [*SOURCE_COUNTS, *OPERATIONAL_SNAPSHOTS]
+    silver_names = [*SOURCE_COUNTS, *OPERATIONAL_SNAPSHOTS, EVENTS_SNAPSHOT]
     gold_names = [
         "dim_member", "dim_workstation", "dim_date", "dim_time", "dim_concession_item",
         "fact_rental", "fact_concession_sale", "fact_concession_line_item",
@@ -490,6 +524,11 @@ def reconcile(run_id: str = "", *, include_redshift: bool = True) -> Reconciliat
         report.skipped_layers.append(f"dynamodb ({exc})")
 
     # ---- source -> Silver -> Gold
+    # Hoisted for the same reason rds_bootstrap is: the Redshift block compares dim_member
+    # and fact_workstation_event against these, and must skip those comparisons rather than
+    # die with a NameError if Silver/Gold could not be read.
+    silver: dict[str, int] = {}
+    gold: dict[str, int] = {}
     try:
         silver, gold = _silver_gold_counts()
         for dataset, expected in SOURCE_COUNTS.items():
@@ -501,11 +540,17 @@ def reconcile(run_id: str = "", *, include_redshift: bool = True) -> Reconciliat
                     detail="Silver must preserve every source row",
                 )
             )
+        # fact_workstation_event is the one fact with two sources: the 58,218 Bronze events
+        # and whatever the POS has emitted since, which the DynamoDB export leaves in
+        # `workstation_events_operational`. A literal here would fail every run in which the
+        # cafe was open — and, until the export was fixed, concealed that those events were
+        # being discarded hourly before they ever reached Gold.
+        events_expected = SOURCE_COUNTS["workstation_events"] + silver.get(EVENTS_SNAPSHOT, 0)
         gold_expected = {
             "dim_workstation": 175, "dim_date": 365, "dim_time": 1_440,
             "dim_concession_item": 10, "fact_rental": 28_287,
             "fact_concession_sale": 21_077, "fact_concession_line_item": 29_672,
-            "fact_points_activity": 55_514, "fact_workstation_event": 58_218,
+            "fact_points_activity": 55_514, "fact_workstation_event": events_expected,
             "agg_workstation_utilization_hourly": 175 * 24 * 62,
         }
         for dataset, expected in gold_expected.items():
@@ -557,6 +602,27 @@ def reconcile(run_id: str = "", *, include_redshift: bool = True) -> Reconciliat
                     ),
                 )
             )
+        # The events snapshot has no RDS counterpart to be compared against, so it is held to
+        # the property the RDS ones get for free: it may grow, it may hold steady, it may not
+        # shrink. Written by the delta instead of the snapshot, it shrank to one hour's events
+        # on every run for its entire life, and no check in this file could see it.
+        events_snapshot = silver.get(EVENTS_SNAPSHOT, 0)
+        events_floor = _high_water_mark(f"silver_snapshot:{EVENTS_SNAPSHOT}")
+        report.add(
+            Check(
+                name=f"silver_snapshot:{EVENTS_SNAPSHOT}", layer_from="dynamodb",
+                layer_to="silver",
+                expected=events_floor, actual=events_snapshot,
+                passed=events_snapshot >= events_floor,
+                severity=SEVERITY_CRITICAL,
+                detail=(
+                    "the DynamoDB -> S3 export must leave a full snapshot in Silver, not the "
+                    "delta it moved; Gold reads this as the API-emitted event stream. A "
+                    "deliberate rebuild that legitimately shrinks it needs the history "
+                    "cleared — see docs/runbook.md"
+                ),
+            )
+        )
         report.add(
             Check(
                 name="raw_telemetry_absent_from_gold", layer_from="", layer_to="",
@@ -571,14 +637,24 @@ def reconcile(run_id: str = "", *, include_redshift: bool = True) -> Reconciliat
     # ---- Gold -> Redshift
     if include_redshift:
         try:
+            # dim_member was the one table missing from this dict, so `.get` returned None,
+            # `passed` was unconditionally True and the severity fell to INFO. The most
+            # fragile table in the warehouse — SCD2, and the table F7 emptied — was the only
+            # one whose Redshift count nothing checked. It is SCD2, so a literal would be
+            # wrong: it is compared against Gold, which is where it comes from.
+            redshift_expected: dict[str, int] = {
+                "dim_workstation": 175, "dim_date": 365, "dim_time": 1_440,
+                "dim_concession_item": 10, "fact_rental": 28_287,
+                "fact_concession_sale": 21_077, "fact_concession_line_item": 29_672,
+                "fact_points_activity": 55_514,
+                "agg_workstation_utilization_hourly": 175 * 24 * 62,
+            }
+            for dataset in ("dim_member", "fact_workstation_event"):
+                if gold.get(dataset):
+                    redshift_expected[dataset] = gold[dataset]
+
             for table, actual in _redshift_counts().items():
-                expected_rows: int | None = {
-                    "dim_workstation": 175, "dim_date": 365, "dim_time": 1_440,
-                    "dim_concession_item": 10, "fact_rental": 28_287,
-                    "fact_concession_sale": 21_077, "fact_concession_line_item": 29_672,
-                    "fact_points_activity": 55_514, "fact_workstation_event": 58_218,
-                    "agg_workstation_utilization_hourly": 175 * 24 * 62,
-                }.get(table)
+                expected_rows: int | None = redshift_expected.get(table)
                 report.add(
                     Check(
                         name=f"redshift_rows:{table}", layer_from="gold", layer_to="redshift",

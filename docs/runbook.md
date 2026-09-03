@@ -67,7 +67,7 @@ ssh -i jupyter.pem -L 8000:localhost:8000 -L 8080:localhost:8080 ubuntu@<host>
 |---|---|---|
 | `bootstrap_raw_landing` | manual | The only DAG that reads the EC2 landing directory |
 | `rds_to_s3_incremental` | `0 * * * *` | RDS -> Silver snapshots, by `updated_at` watermark |
-| `dynamodb_to_s3_incremental` | `15 * * * *` | Recent events -> Silver, via GSI2 per event type |
+| `dynamodb_to_s3_incremental` | `15 * * * *` | API-emitted events -> Silver **snapshot**, via GSI2 per event type |
 | `curate_silver_gold` | `30 * * * *` | Bronze -> Silver -> Gold |
 | `load_redshift` | `45 * * * *` | Gold -> Redshift, delete-then-insert per table |
 | `reconcile_data` | `0 */6 * * *` | Every check; a critical failure fails the run |
@@ -112,13 +112,66 @@ truncate the snapshot. That happened once, on the first incremental run after th
 1,200 members to 8 versions. The export now merges its delta onto the previous snapshot by
 primary key.
 
+The same rule binds the DynamoDB export. It wrote its delta over
+`workstation_events_operational` on every hourly run, so the snapshot held one hour of
+API-emitted events and nothing older. Nothing failed, because Gold read the Bronze-derived
+events and never looked at the snapshot at all. Gold now reads both, and
+`silver_snapshot:workstation_events_operational` is CRITICAL.
+
 Repair:
 
 ```bash
-$(PY) -m aimternet.pipeline.cli curate --layer export --full   # rebuild the snapshots
+$(PY) -m aimternet.pipeline.cli curate --layer export --full   # rebuild the RDS snapshots
+$(PY) -m aimternet.pipeline.cli curate --layer export-ddb      # rebuild the events snapshot
 $(PY) -m aimternet.pipeline.cli curate --layer gold            # rebuild the dimensions
 make redshift                                                  # push them to the warehouse
 make reconcile
+```
+
+### `silver_snapshot:workstation_events_operational` fails after a deliberate rebuild
+
+That check has no RDS table to compare against, so it is held to a high-water mark: the
+snapshot may grow or hold steady, never shrink. The mark is read from `reconciliation_results`,
+which means a rebuild that legitimately makes it smaller — a cleared bucket, a re-bootstrapped
+DynamoDB table — trips it once and keeps tripping.
+
+Confirm the shrink is intended, then clear the history for that check alone:
+
+```sql
+DELETE FROM aimternet_oltp.reconciliation_results
+ WHERE check_name = 'silver_snapshot:workstation_events_operational';
+```
+
+The next run re-establishes the mark at the new size. Clear nothing else: the point of the
+check is that shrinking requires a person to say so.
+
+### `redshift_rows:dim_member` fails, or a member has several `is_current` rows
+
+`dim_member` used to be merged on `member_key`, which Gold recomputes as a `row_number()` on
+every build. Delete-then-insert on a key that renumbers itself deletes the keys the new build
+happens to occupy and leaves everything above that watermark behind. After a build that
+produced fewer SCD2 versions than the last one, Redshift kept the new rows *and* the stale
+ones — duplicate `member_id`s, several `is_current = true` rows per member, and a row count
+that had not fallen, so no count check could see it.
+
+The merge is now keyed on `(member_id, valid_from_utc)`. That fixes every future load but
+does not retract rows an earlier `member_key`-keyed merge already orphaned. Once, after
+deploying this change:
+
+```sql
+DELETE FROM aimternet_olap.dim_member;   -- one-time; the merge is correct from here
+```
+
+```bash
+$(PY) -m aimternet.pipeline.cli load-redshift --datasets dim_member
+make reconcile        # redshift_rows:dim_member is CRITICAL now, and compares against Gold
+```
+
+Check first — if it is already clean, skip it:
+
+```sql
+SELECT member_id, count(*) FILTER (WHERE is_current) AS current_versions
+  FROM aimternet_olap.dim_member GROUP BY member_id HAVING count(*) FILTER (WHERE is_current) > 1;
 ```
 
 ### The DynamoDB load looks stuck
@@ -134,8 +187,24 @@ checkpoints make it skip what is already written.
 
 Expected. The cluster has no default IAM role and inline credentials are prohibited, so the
 loader falls back to batched `INSERT` — it probes at run time and records which path it took.
-To switch back to `COPY`: create the role (`infra/iam.tf` has it, behind `manage_iam`),
-attach it to the cluster, and set `AIMTERNET_REDSHIFT_COPY_IAM_ROLE`.
+
+To switch to `COPY`, in this order:
+
+1. **Create the role.** Set `manage_redshift_copy_role = true` in `infra/terraform.tfvars` and
+   `make infra-plan`, then apply. This flag exists separately from `manage_iam` because
+   `manage_iam` also creates the EC2 pipeline role, which would duplicate the instance profile
+   this shared account already has. Take the ARN from the `redshift_copy_role_arn` output.
+2. **Attach it to the cluster by hand**, in the console or with `aws redshift
+   modify-cluster-iam-roles`. Terraform deliberately cannot do this: invariant 10 keeps
+   Redshift out of its reach, `aws_redshift_cluster_iam_roles` is on the forbidden-resource
+   list in `tests/unit/test_infra_terraform.py`, and the IAM user cannot call
+   `redshift:DescribeClusters` in any case.
+3. **Set `AIMTERNET_REDSHIFT_COPY_IAM_ROLE`** to the ARN. The loader probes on the next run and
+   switches strategy on its own — no code change.
+
+Watch the first `COPY` run closely. That path had never executed on this cluster, so it has no
+production history: Redshift matches Parquet columns by *position*, and the loader now names
+its columns explicitly on both paths for that reason.
 
 ### Airflow will not list DAGs
 

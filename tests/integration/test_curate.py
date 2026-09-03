@@ -29,10 +29,28 @@ GOLD_EXPECTED = {
     "fact_concession_sale": 21_077,
     "fact_concession_line_item": 29_672,
     "fact_points_activity": 55_514,
-    "fact_workstation_event": 58_218,
+    # fact_workstation_event is derived, not frozen -- see _events_expected().
     # 175 workstations x 24 hours x 62 days
     "agg_workstation_utilization_hourly": 260_400,
 }
+
+
+def _events_expected() -> int:
+    """Bronze events plus whatever the POS has emitted since.
+
+    Not a literal. fact_workstation_event is the one fact with two sources -- the 58,218
+    Bronze events and the API-emitted ones the DynamoDB export leaves in
+    `workstation_events_operational` -- so a constant here fails on any bucket where the cafe
+    has been open. Pinning it to the Bronze count is also what let those events go missing:
+    the number that "proved" Gold was correct was the number that could not see them.
+    """
+    from aimternet.pipeline.curate.engine import count_parquet, duck, layer_uri
+
+    with duck() as connection:
+        operational = count_parquet(
+            connection, layer_uri("silver", "workstation_events_operational")
+        )
+    return 58_218 + operational
 
 
 @pytest.fixture(scope="module")
@@ -55,6 +73,17 @@ def test_gold_reconciles_to_silver(con, dataset: str) -> None:
     from aimternet.pipeline.curate.engine import count_parquet, layer_uri
 
     assert count_parquet(con, layer_uri("gold", dataset)) == GOLD_EXPECTED[dataset]
+
+
+def test_the_api_emitted_events_reach_gold(con) -> None:
+    """Every event in the operational snapshot must be in fact_workstation_event.
+
+    The export wrote its delta over that snapshot hourly and Gold read Bronze alone, so POS
+    sessions stopped at Silver. Asserted against the live layers, not a constant.
+    """
+    from aimternet.pipeline.curate.engine import count_parquet, layer_uri
+
+    assert count_parquet(con, layer_uri("gold", "fact_workstation_event")) == _events_expected()
 
 
 def test_no_float_columns_survive_into_silver_or_gold(con) -> None:

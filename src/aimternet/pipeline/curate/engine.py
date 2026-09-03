@@ -86,6 +86,48 @@ def write_parquet(
     con.execute(f"COPY ({select_sql}) TO '{target}' ({', '.join(options)})", params or [])
 
 
+def merge_onto_snapshot(
+    con: duckdb.DuckDBPyConnection, *, delta: str, destination: str, key: str
+) -> str:
+    """A SELECT producing the whole dataset: ``delta`` merged onto the previous snapshot.
+
+    Both incremental exports must write a *snapshot*, never the delta they moved. Gold reads
+    the Silver dataset as the current state of its source, so a run writing only its delta is
+    a truncate wearing an incremental's clothes. That is finding F7, and it cost ``dim_member``
+    2,227 of its 2,235 SCD2 versions with nothing failing.
+
+    ``delta`` names a registered relation or temp table. Rows of the previous snapshot whose
+    ``key`` the delta supersedes are dropped; every other row survives. When no snapshot exists
+    yet -- the first run, or a bucket never written to -- the delta is the whole dataset and
+    there is nothing to merge onto.
+    """
+    pattern = f"{destination.rstrip('/')}/**/*.parquet"
+    try:
+        con.execute(f"SELECT 1 FROM read_parquet('{pattern}') LIMIT 1")
+    except duckdb.IOException as exc:
+        # Only a genuinely absent snapshot may fall back to "the delta is everything".
+        # A snapshot that exists but cannot be read -- corrupt file, expired credentials, a
+        # half-written prefix -- must raise, because silently treating it as absent is the
+        # F7 truncate by another route.
+        if "no files found" not in str(exc).lower():
+            raise
+        return f"SELECT * FROM {delta}"
+
+    # NOT EXISTS rather than NOT IN. `previous.key NOT IN (SELECT key FROM delta)` evaluates
+    # to NULL for every row the moment one delta key is NULL, so nothing at all survives from
+    # the previous snapshot -- degrading the merge into precisely the truncate it exists to
+    # prevent. The anti-join fails safe instead: an unmatched or NULL key retains the row.
+    #
+    # Column order comes from the delta, so a snapshot written under an older schema cannot
+    # scramble the columns on the UNION.
+    return f"""
+        SELECT * FROM {delta}
+        UNION ALL BY NAME
+        SELECT * FROM read_parquet('{pattern}') previous
+        WHERE NOT EXISTS (SELECT 1 FROM {delta} d WHERE d.{key} = previous.{key})
+    """
+
+
 def count_parquet(con: duckdb.DuckDBPyConnection, uri: str) -> int:
     """Row count for a written dataset, used by reconciliation."""
     pattern = f"{uri.rstrip('/')}/**/*.parquet"

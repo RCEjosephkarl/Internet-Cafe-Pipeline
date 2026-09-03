@@ -218,9 +218,18 @@ def _cmd_bootstrap(args: argparse.Namespace) -> int:
     if rc != 0:
         return rc
 
+    # `days` is a telemetry limit, not a global one -- the DAG passes it only for telemetry
+    # (`days=days if dataset == "telemetry" else None`). Passing it to both datasets meant
+    # `bootstrap --telemetry-days 3` silently loaded three days of workstation_events too,
+    # contradicting the flag's own help text.
+    rc = _cmd_load_dynamodb(argparse.Namespace(
+        datasets=["workstation_events"], days=None, threads=None, run_id=None,
+    ))
+    if rc != 0:
+        return rc
+
     return _cmd_load_dynamodb(argparse.Namespace(
-        datasets=["workstation_events", "telemetry"],
-        days=args.telemetry_days, threads=None, run_id=None,
+        datasets=["telemetry"], days=args.telemetry_days, threads=None, run_id=None,
     ))
 
 
@@ -235,13 +244,19 @@ def _cmd_load_dynamodb(args: argparse.Namespace) -> int:
     from aimternet.pipeline.loaders.dynamodb import ensure_tables, load_dataset
 
     print("tables:", json.dumps(ensure_tables(), indent=2))
+    failed = 0
     for dataset in args.datasets:
         report = load_dataset(
             dataset, run_id=args.run_id or "", threads=args.threads, days=args.days
         )
         print()
         print(report.summary())
-    return 0
+        # The DAG raises on report.failures. This used to return 0 regardless, so a bootstrap
+        # that failed to load files still reported success and `make bootstrap` exited clean.
+        if report.failures:
+            print(f"  {dataset}: {len(report.failures)} file(s) failed", file=sys.stderr)
+            failed += len(report.failures)
+    return 1 if failed else 0
 
 
 def _cmd_load_redshift(args: argparse.Namespace) -> int:
@@ -252,8 +267,13 @@ def _cmd_load_redshift(args: argparse.Namespace) -> int:
 
 
 def _cmd_curate(args: argparse.Namespace) -> int:
-    """Silver, then the RDS export, then Gold. Order matters: Gold reads both."""
-    from aimternet.pipeline.curate import export_rds, gold, silver
+    """Silver, then both operational exports, then Gold. Order matters: Gold reads all three.
+
+    `export-ddb` used to have no CLI path at all -- it existed only inside the Airflow DAG --
+    so neither `make curate` nor the runbook's repair recipe could rebuild the events snapshot
+    that Gold reads. A layer only Airflow can build is a layer nobody can repair.
+    """
+    from aimternet.pipeline.curate import export_dynamodb, export_rds, gold, silver
 
     run_id = args.run_id or f"curate-{uuid.uuid4().hex[:12]}"
     if args.layer in ("silver", "all"):
@@ -261,6 +281,9 @@ def _cmd_curate(args: argparse.Namespace) -> int:
         print()
     if args.layer in ("export", "all"):
         print(export_rds.export(run_id, full=args.full).summary())
+        print()
+    if args.layer in ("export-ddb", "all"):
+        print(export_dynamodb.export_events(run_id).summary())
         print()
     if args.layer in ("gold", "all"):
         print(gold.build(run_id).summary())
@@ -375,7 +398,11 @@ def build_parser() -> argparse.ArgumentParser:
     ddb_p.set_defaults(func=_cmd_load_dynamodb)
 
     curate_p = sub.add_parser("curate", help="build Silver and Gold from Bronze")
-    curate_p.add_argument("--layer", choices=("silver", "export", "gold", "all"), default="all")
+    curate_p.add_argument(
+        "--layer",
+        choices=("silver", "export", "export-ddb", "gold", "all"),
+        default="all",
+    )
     curate_p.add_argument("--telemetry-days", type=int, default=None)
     curate_p.add_argument("--full", action="store_true", help="full RDS export, not incremental")
     curate_p.add_argument("--run-id", default=None)

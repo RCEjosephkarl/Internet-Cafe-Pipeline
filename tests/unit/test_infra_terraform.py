@@ -67,6 +67,11 @@ FORBIDDEN_RESOURCE_TYPES = {
     "aws_redshift_cluster": "Redshift is pre-existing and shared with krusty_krab_olap",
     "aws_redshiftserverless_namespace": "same",
     "aws_redshiftserverless_workgroup": "same",
+    # Not a cluster resource, so the rule above does not catch it -- but it modifies the
+    # shared cluster's attached roles, which is exactly what invariant 10 forbids. Absent by
+    # omission until now; absent by decision from here. The COPY role is created by Terraform
+    # and attached by hand (docs/runbook.md).
+    "aws_redshift_cluster_iam_roles": "attaching a role modifies a cluster we do not own",
 }
 
 

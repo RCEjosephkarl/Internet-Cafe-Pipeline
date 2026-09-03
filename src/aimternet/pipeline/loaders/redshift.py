@@ -34,7 +34,13 @@ DDL_PATH = Path(__file__).resolve().parents[2] / "db" / "redshift_ddl" / "schema
 
 # Gold dataset -> (target table, primary key columns used to de-duplicate on merge)
 TABLES: dict[str, tuple[str, tuple[str, ...]]] = {
-    "dim_member": ("dim_member", ("member_key",)),
+    # Keyed on the business key, NOT on member_key. member_key is a row_number() that Gold
+    # recomputes from scratch on every build (gold.py), so a merge keyed on it deletes the
+    # keys the new build happens to occupy and leaves every row above that watermark behind:
+    # after an F7-style shrink from 2,235 versions to 8, Redshift keeps 8 fresh rows and
+    # 2,227 stale ones, with duplicate member_ids and several is_current rows apiece. The row
+    # count does not fall, so no count check can see it.
+    "dim_member": ("dim_member", ("member_id", "valid_from_utc")),
     "dim_workstation": ("dim_workstation", ("workstation_key",)),
     "dim_date": ("dim_date", ("date_id",)),
     "dim_time": ("dim_time", ("time_id",)),
@@ -120,6 +126,34 @@ def _target_columns(table: str) -> list[str]:
         return [row[0] for row in cur.fetchall()]
 
 
+def _gold_columns(dataset: str) -> set[str]:
+    """The column names the Gold Parquet for ``dataset`` actually carries."""
+    with duck() as con:
+        uri = f"{layer_uri('gold', dataset)}/**/*.parquet"
+        return {
+            name
+            for name, *_ in con.execute(
+                f"DESCRIBE SELECT * FROM read_parquet('{uri}')"
+            ).fetchall()
+        }
+
+
+def _selected_columns(dataset: str, table: str, columns: list[str]) -> list[str]:
+    """Target columns that Gold actually supplies, in target order.
+
+    Anything the warehouse declares but Gold does not write would be loaded as NULL for every
+    row. That is how a renamed Gold column empties a warehouse column with the row count still
+    reconciling, so it is a warning rather than the DEBUG line it used to be -- DEBUG is below
+    the default level, which made it invisible exactly when it mattered.
+    """
+    available = _gold_columns(dataset)
+    selected = [c for c in columns if c in available and c not in _PARTITION_COLUMNS]
+    missing = [c for c in columns if c not in available and c not in _PARTITION_COLUMNS]
+    if missing:
+        log.warning("%s: columns absent from Gold, will load as NULL: %s", table, missing)
+    return selected
+
+
 def _load_table_via_insert(dataset: str, table: str, keys: tuple[str, ...], run_id: str) -> int:
     """Stage the Gold Parquet, then merge it in one transaction.
 
@@ -131,16 +165,9 @@ def _load_table_via_insert(dataset: str, table: str, keys: tuple[str, ...], run_
     if not columns:
         raise RuntimeError(f"{table} does not exist in Redshift; run the DDL first")
 
+    selected = _selected_columns(dataset, table, columns)
     with duck() as con:
         uri = f"{layer_uri('gold', dataset)}/**/*.parquet"
-        available = {
-            name
-            for name, *_ in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{uri}')").fetchall()
-        }
-        selected = [c for c in columns if c in available and c not in _PARTITION_COLUMNS]
-        missing = [c for c in columns if c not in available and c not in _PARTITION_COLUMNS]
-        if missing:
-            log.debug("%s: columns absent from Gold, left NULL: %s", table, missing)
         rows = con.execute(
             f"SELECT {', '.join(selected)} FROM read_parquet('{uri}')"
         ).fetchall()
@@ -149,7 +176,11 @@ def _load_table_via_insert(dataset: str, table: str, keys: tuple[str, ...], run_
         return 0
 
     staging = f"stg_{table}"
-    key_join = " AND ".join(f"t.{k} = s.{k}" for k in keys)
+    # Built directly against the target, the way the COPY path already does it. The previous
+    # form built `t.<k> = s.<k>` and then rewrote it with `.replace("t.", table)`, a blind
+    # substring swap over a predicate -- correct for today's key sets, and quietly corrupting
+    # for any future key column containing "t.".
+    key_join = " AND ".join(f"{table}.{k} = s.{k}" for k in keys)
 
     # Multi-row VALUES rather than executemany: redshift_connector's executemany issues one
     # round trip per row, which turns 260,400 rows into 260,400 network hops. Batching keeps
@@ -171,8 +202,7 @@ def _load_table_via_insert(dataset: str, table: str, keys: tuple[str, ...], run_
 
         # Delete-then-insert in one transaction: the MERGE equivalent, and the reason a
         # second run adds nothing rather than duplicating every fact.
-        delete_join = key_join.replace("t.", f"{table}.")
-        cur.execute(f"DELETE FROM {table} USING {staging} s WHERE {delete_join}")
+        cur.execute(f"DELETE FROM {table} USING {staging} s WHERE {key_join}")
         cur.execute(
             f"INSERT INTO {table} ({column_list}) SELECT {column_list} FROM {staging}"
         )
@@ -182,20 +212,41 @@ def _load_table_via_insert(dataset: str, table: str, keys: tuple[str, ...], run_
 
 
 def _load_table_via_copy(dataset: str, table: str, keys: tuple[str, ...], run_id: str) -> int:
-    """COPY the Gold Parquet through a staging table, then merge."""
+    """COPY the Gold Parquet through a staging table, then merge.
+
+    Redshift's Parquet COPY matches columns **by position**, not by name, so the staging table
+    has to be built from the columns the Parquet actually carries and in that order -- not
+    `LIKE {table}`, which brings the full target column list along. Gold does not always write
+    every target column (the INSERT path has a `missing` branch for precisely that), and Gold
+    also writes Hive partition columns that are not warehouse columns at all. Either mismatch
+    shifts every value one column to the left, silently.
+
+    This path has never run on the current cluster: `choose_strategy` probes and falls back to
+    INSERT because no IAM role is attached. It is written to be correct on the day one is.
+    """
     cfg = settings()
     clause = redshift.copy_credentials_clause()
     uri = f"s3://{cfg.require_bucket()}/{cfg.s3_gold_prefix}/{dataset}/"
+
+    columns = _target_columns(table)
+    if not columns:
+        raise RuntimeError(f"{table} does not exist in Redshift; run the DDL first")
+    selected = _selected_columns(dataset, table, columns)
+    column_list = ", ".join(selected)
+
     staging = f"stg_{table}"
     key_join = " AND ".join(f"{table}.{k} = s.{k}" for k in keys)
 
     with redshift.connection() as conn, conn.cursor() as cur:
         cur.execute(f"SET search_path TO {cfg.redshift_schema}, public")
         cur.execute(f"DROP TABLE IF EXISTS {staging}")
-        cur.execute(f"CREATE TEMP TABLE {staging} (LIKE {table})")
-        cur.execute(f"COPY {staging} FROM '{uri}' {clause} FORMAT AS PARQUET")
+        # Only the columns being loaded, in the order the COPY will supply them.
+        cur.execute(f"CREATE TEMP TABLE {staging} AS SELECT {column_list} FROM {table} LIMIT 0")
+        cur.execute(f"COPY {staging} ({column_list}) FROM '{uri}' {clause} FORMAT AS PARQUET")
         cur.execute(f"DELETE FROM {table} USING {staging} s WHERE {key_join}")
-        cur.execute(f"INSERT INTO {table} SELECT * FROM {staging}")
+        cur.execute(
+            f"INSERT INTO {table} ({column_list}) SELECT {column_list} FROM {staging}"
+        )
         cur.execute(f"SELECT count(*) FROM {staging}")
         loaded = int(cur.fetchone()[0])
         cur.execute(f"DROP TABLE IF EXISTS {staging}")

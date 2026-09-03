@@ -28,7 +28,11 @@ output "dynamodb_tables" {
 
 output "redshift_copy_role_arn" {
   description = "Set AIMTERNET_REDSHIFT_COPY_IAM_ROLE to this to switch the loader from batched INSERT to COPY."
-  value       = var.manage_iam ? aws_iam_role.redshift_copy[0].arn : null
+  value = (
+    var.manage_iam || var.manage_redshift_copy_role
+    ? aws_iam_role.redshift_copy[0].arn
+    : null
+  )
 }
 
 output "estimated_monthly_cost_usd" {

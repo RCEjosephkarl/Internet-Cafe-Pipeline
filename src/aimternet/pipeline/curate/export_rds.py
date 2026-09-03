@@ -24,7 +24,13 @@ import duckdb
 import pandas as pd
 
 from aimternet.db.session import connection, fetch_all
-from aimternet.pipeline.curate.engine import count_parquet, duck, layer_uri, write_parquet
+from aimternet.pipeline.curate.engine import (
+    count_parquet,
+    duck,
+    layer_uri,
+    merge_onto_snapshot,
+    write_parquet,
+)
 
 log = logging.getLogger(__name__)
 
@@ -84,26 +90,15 @@ def _snapshot_uri(table: str) -> str:
 
 
 def _merge_sql(table: str, key: str, con: duckdb.DuckDBPyConnection) -> str:
-    """Delta over previous snapshot, keyed by ``key``.
+    """Delta over the previous snapshot for ``table``, keyed by ``key``.
 
-    Returns a SELECT producing the *whole* table as it now stands. When no snapshot exists
-    yet -- the first run, or a bucket that has never been written -- the delta is the whole
-    table and there is nothing to merge onto.
+    The merge itself lives in ``curate.engine``: the DynamoDB export needs exactly the same
+    thing, and two implementations of "write a snapshot, not a delta" is how F7 got to happen
+    a second time in a sibling module.
     """
-    pattern = f"{_snapshot_uri(table).rstrip('/')}/**/*.parquet"
-    try:
-        con.execute(f"SELECT 1 FROM read_parquet('{pattern}') LIMIT 1")
-    except duckdb.IOException:
-        return "SELECT * FROM export_frame"
-
-    # Column order comes from the delta, so a snapshot written by an older schema cannot
-    # scramble the columns on a UNION.
-    return f"""
-        SELECT * FROM export_frame
-        UNION ALL BY NAME
-        SELECT * FROM read_parquet('{pattern}') previous
-        WHERE previous.{key} NOT IN (SELECT {key} FROM export_frame)
-    """
+    return merge_onto_snapshot(
+        con, delta="export_frame", destination=_snapshot_uri(table), key=key
+    )
 
 
 def export(run_id: str, *, full: bool = False) -> ExportReport:

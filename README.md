@@ -79,7 +79,7 @@ make airflow              # :8080
 |---|---|---|
 | `bootstrap_raw_landing` | manual | EC2 landing -> Bronze -> RDS + DynamoDB. The only DAG that reads the landing directory |
 | `rds_to_s3_incremental` | `0 * * * *` | RDS -> Silver operational snapshots |
-| `dynamodb_to_s3_incremental` | `15 * * * *` | Recent events -> Silver |
+| `dynamodb_to_s3_incremental` | `15 * * * *` | API-emitted events -> Silver snapshot -> Gold |
 | `curate_silver_gold` | `30 * * * *` | Bronze -> Silver -> Gold |
 | `load_redshift` | `45 * * * *` | Gold -> Redshift |
 | `reconcile_data` | `0 */6 * * *` | Every layer against every other |

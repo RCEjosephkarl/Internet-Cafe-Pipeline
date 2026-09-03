@@ -95,6 +95,23 @@ def test_skipped_layers_are_declared_rather_than_passed_over() -> None:
     assert "redshift (connection refused)" in markdown
 
 
+def test_a_skipped_layer_fails_the_run() -> None:
+    """"We could not look" is not "we looked and it was fine".
+
+    Every collector in reconcile() is wrapped in `except Exception: skipped_layers.append(...)`,
+    and `passed` used to ignore that list. So one S3 error inside `_silver_gold_counts` removed
+    all eleven silver_rows checks, every gold_rows check, the dim_member F7 guard and every
+    CRITICAL silver_snapshot check at once -- and the report went green, because a check that
+    was never added cannot fail.
+    """
+    report = _report()
+    report.add(_count_check("rds_rows:members", 1200, 1200))
+    assert report.passed
+
+    report.skipped_layers.append("silver/gold (connection reset by peer)")
+    assert not report.passed
+
+
 def test_the_report_embeds_the_policy_and_its_evidence() -> None:
     """§11 asks for every assumption. The report carries them so it stands alone."""
     markdown = _report().to_markdown()

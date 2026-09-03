@@ -23,9 +23,27 @@ EXPECTED = {
     "fact_concession_sale": 21_077,
     "fact_concession_line_item": 29_672,
     "fact_points_activity": 55_514,
-    "fact_workstation_event": 58_218,
+    # fact_workstation_event is derived -- see _events_expected().
     "agg_workstation_utilization_hourly": 175 * 24 * 62,
 }
+
+
+def _events_expected() -> int:
+    """Bronze events plus whatever the POS has emitted since.
+
+    Not a literal. fact_workstation_event is the one fact with two sources -- the 58,218
+    Bronze events and the API-emitted ones the DynamoDB export leaves in
+    `workstation_events_operational` -- so a constant here fails on any bucket where the cafe
+    has been open. Pinning it to the Bronze count is also what let those events go missing:
+    the number that "proved" Gold was correct was the number that could not see them.
+    """
+    from aimternet.pipeline.curate.engine import count_parquet, duck, layer_uri
+
+    with duck() as connection:
+        operational = count_parquet(
+            connection, layer_uri("silver", "workstation_events_operational")
+        )
+    return 58_218 + operational
 
 
 @pytest.fixture(scope="module")
@@ -38,7 +56,7 @@ def schema() -> str:
 def test_every_table_matches_gold() -> None:
     from aimternet.pipeline.loaders.redshift import table_counts
 
-    assert table_counts() == EXPECTED
+    assert table_counts() == {**EXPECTED, "fact_workstation_event": _events_expected()}
 
 
 def test_no_money_column_is_floating_point(schema: str) -> None:

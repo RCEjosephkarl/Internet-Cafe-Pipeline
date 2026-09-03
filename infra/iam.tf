@@ -172,7 +172,7 @@ data "aws_iam_policy_document" "redshift_assume" {
 }
 
 resource "aws_iam_role" "redshift_copy" {
-  count = var.manage_iam ? 1 : 0
+  count = var.manage_iam || var.manage_redshift_copy_role ? 1 : 0
 
   name               = "aimternet-redshift-copy"
   description        = "Lets Redshift COPY read the Gold prefix"
@@ -180,7 +180,7 @@ resource "aws_iam_role" "redshift_copy" {
 }
 
 resource "aws_iam_role_policy" "redshift_copy" {
-  count = var.manage_iam ? 1 : 0
+  count = var.manage_iam || var.manage_redshift_copy_role ? 1 : 0
 
   name   = "aimternet-redshift-copy"
   role   = aws_iam_role.redshift_copy[0].id

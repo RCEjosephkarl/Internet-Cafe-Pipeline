@@ -8,6 +8,11 @@ aggregated to ``agg_workstation_utilization_hourly`` -- 175 workstations x 24 ho
 = 260,400 rows. Loading the raw grain into a warehouse would cost a great deal and answer no
 question the hourly grain cannot (§6.5).
 
+**Facts include what the POS did, not only what the source files held.** API-emitted
+workstation events reach Gold through ``workstation_events_operational`` -- the DynamoDB
+export -- unioned onto the Bronze-derived events. Reading only Bronze would mean the warehouse
+never saw a single session the cafe actually ran since the bootstrap.
+
 **dim_member is SCD2 on tier.** The tier a member held is recorded on every rental as
 ``member_tier_applied``, so their tier history can be reconstructed exactly rather than
 guessed: consecutive rentals at the same tier collapse into one version, and a change opens a
@@ -29,6 +34,10 @@ log = logging.getLogger(__name__)
 @dataclass
 class GoldReport:
     rows: dict[str, int] = field(default_factory=dict)
+    #: Rows contributed by the operational snapshots rather than by Bronze. Reported
+    #: separately so a caller can derive what a fact table *should* hold: the counts that
+    #: matter are no longer constants, and a check that assumes they are cannot see growth.
+    operational_rows: dict[str, int] = field(default_factory=dict)
     duration_seconds: float = 0.0
 
     def summary(self) -> str:
@@ -43,6 +52,84 @@ class GoldReport:
 
 def _silver(dataset: str) -> str:
     return f"read_parquet('{layer_uri('silver', dataset)}/**/*.parquet')"
+
+
+#: The shape Gold needs from the operational events snapshot. The DynamoDB export writes
+#: whatever attributes the items carried, and events carry optional ones -- an hour in which
+#: nobody started a session produces a snapshot with no ``session_id`` column at all. A
+#: zero-row template unioned BY NAME fills those gaps with NULL instead of failing the build.
+_OPERATIONAL_EVENT_COLUMNS = (
+    "event_id",
+    "workstation_id",
+    "event_type",
+    "event_timestamp_utc",
+    "session_id",
+    "member_id",
+    "duration_allocated_hours",
+    "client_os_version",
+)
+
+#: Columns the two event sources are unioned on.
+_EVENT_COLUMNS = ", ".join([*_OPERATIONAL_EVENT_COLUMNS, "source_file"])
+
+
+def _operational_events(con: object) -> str | None:
+    """The API-emitted events, projected into the same shape as the Bronze-derived ones.
+
+    ``None`` when the export has never run, so a fresh bucket builds Bronze-only rather than
+    failing. Everything in the snapshot is VARCHAR -- DynamoDB attributes are cast to string
+    on the way out -- so the types are rebuilt here.
+    """
+    from aimternet.pipeline.curate.engine import count_parquet
+
+    uri = layer_uri("silver", "workstation_events_operational")
+    if not count_parquet(con, uri):  # type: ignore[arg-type]
+        return None
+
+    template = ", ".join(f"NULL::VARCHAR AS {column}" for column in _OPERATIONAL_EVENT_COLUMNS)
+    return f"""
+        SELECT event_id, workstation_id, event_type,
+               CAST(event_timestamp_utc AS TIMESTAMPTZ)       AS event_timestamp_utc,
+               nullif(session_id, '')                         AS session_id,
+               nullif(member_id, '')                          AS member_id,
+               CAST(duration_allocated_hours AS DECIMAL(6,2)) AS duration_allocated_hours,
+               client_os_version,
+               -- Lineage still says where the row came from: these never touched a file.
+               'dynamodb:api'                                 AS source_file
+        FROM (
+            SELECT * FROM read_parquet('{uri}/**/*.parquet')
+            UNION ALL BY NAME
+            SELECT {template} WHERE false
+        )
+    """
+
+
+def event_source(con: object) -> tuple[str, int]:
+    """Every workstation event Gold should see, and how many came from the POS.
+
+    Two origins: the Bronze events in Silver, and the API-emitted ones the DynamoDB export
+    leaves in ``workstation_events_operational``. Reading only the first meant the warehouse
+    never saw a session the cafe actually ran after the bootstrap.
+
+    Deduplicated on ``event_id``. The two id spaces do not overlap today -- source ids versus
+    ``EVT-API-*`` -- but relying on that rather than asserting it is how a fact table quietly
+    doubles. Extracted from ``build`` so it can be exercised without S3.
+    """
+    operational = _operational_events(con)
+    count = 0
+    if operational:
+        counted = con.execute(f"SELECT count(*) FROM ({operational})").fetchone()  # type: ignore[attr-defined]
+        count = int(counted[0]) if counted else 0
+
+    sql = f"""
+        SELECT {_EVENT_COLUMNS}
+        FROM (
+            SELECT {_EVENT_COLUMNS} FROM {_silver('workstation_events')}
+            {f"UNION ALL BY NAME {operational}" if operational else ""}
+        )
+        QUALIFY row_number() OVER (PARTITION BY event_id ORDER BY source_file) = 1
+    """
+    return sql, count
 
 
 def build(run_id: str) -> GoldReport:
@@ -109,23 +196,30 @@ def build(run_id: str) -> GoldReport:
                 FROM {_silver('members_operational')}
             ),
             tier_events AS (
-                SELECT member_id, member_tier_applied AS tier, session_start_utc AS observed_at
+                SELECT member_id, member_tier_applied AS tier,
+                       session_start_utc AS observed_at, rental_id
                 FROM {_silver('rental_transactions')}
             ),
             with_previous AS (
-                SELECT member_id, tier, observed_at,
-                       lag(tier) OVER (PARTITION BY member_id ORDER BY observed_at) AS prev_tier
+                -- rental_id breaks ties. Ordering on observed_at alone is non-deterministic
+                -- when a member has two rentals starting in the same second, so the version
+                -- count could differ between two builds of identical data -- which, with a
+                -- delete-then-insert merge downstream, is not a cosmetic difference.
+                SELECT member_id, tier, observed_at, rental_id,
+                       lag(tier) OVER (
+                           PARTITION BY member_id ORDER BY observed_at, rental_id
+                       ) AS prev_tier
                 FROM tier_events
             ),
             changes AS (              -- keep only the rows where the tier actually changed
-                SELECT member_id, tier, observed_at
+                SELECT member_id, tier, observed_at, rental_id
                 FROM with_previous
                 WHERE prev_tier IS DISTINCT FROM tier
             ),
             versioned AS (
                 SELECT c.member_id, c.tier, c.observed_at AS valid_from_utc,
                        lead(c.observed_at) OVER (
-                           PARTITION BY c.member_id ORDER BY c.observed_at
+                           PARTITION BY c.member_id ORDER BY c.observed_at, c.rental_id
                        ) AS valid_to_utc
                 FROM changes c
             ),
@@ -239,6 +333,9 @@ def build(run_id: str) -> GoldReport:
             params=[run_id],
         )
 
+        events_source, operational_count = event_source(con)
+        report.operational_rows["workstation_events_operational"] = operational_count
+
         write_parquet(
             con,
             f"""
@@ -248,7 +345,7 @@ def build(run_id: str) -> GoldReport:
                    w.zone_classification,
                    e.source_file, CAST(? AS VARCHAR) AS run_id, now() AS built_at_utc,
                    CAST(e.event_timestamp_utc AS DATE) AS event_date
-            FROM {_silver('workstation_events')} e
+            FROM ({events_source}) e
             LEFT JOIN {_silver('workstations')} w USING (workstation_id)
             """,
             layer_uri("gold", "fact_workstation_event"),
