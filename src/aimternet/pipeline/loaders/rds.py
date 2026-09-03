@@ -51,7 +51,10 @@ LOAD_ORDER = (
 class LoadReport:
     run_id: str
     rows_read: dict[str, int] = field(default_factory=lambda: defaultdict(int))
-    rows_written: dict[str, int] = field(default_factory=lambda: defaultdict(int))
+    # Rows present in the table *after* the load, not rows this run inserted. On a rerun
+    # the writes are all ON CONFLICT no-ops and this number does not move — which is the
+    # idempotency evidence, so it is the number worth reporting.
+    rows_in_table: dict[str, int] = field(default_factory=lambda: defaultdict(int))
     backfilled_members: int = 0
     quarantined_rows: dict[str, int] = field(default_factory=lambda: defaultdict(int))
     orphan_policy: str = ""
@@ -61,13 +64,13 @@ class LoadReport:
         lines = [
             f"RDS load {self.run_id} — orphan policy: {self.orphan_policy}",
             "",
-            f"  {'table':26s} {'read':>10s} {'written':>10s} {'quarantined':>12s}",
+            f"  {'table':26s} {'read':>10s} {'in table':>10s} {'quarantined':>12s}",
             f"  {'-' * 26} {'-' * 10} {'-' * 10} {'-' * 12}",
         ]
         for table in LOAD_ORDER:
             lines.append(
                 f"  {table:26s} {self.rows_read[table]:10,d} "
-                f"{self.rows_written[table]:10,d} {self.quarantined_rows[table]:12,d}"
+                f"{self.rows_in_table[table]:10,d} {self.quarantined_rows[table]:12,d}"
             )
         lines += [
             "",
@@ -332,17 +335,25 @@ def load_all(landing: Path | None = None, run_id: str = "", *, batch_size: int =
             rows = data[table]
             _write(cur, table, rows, run_id, page)
             cur.execute(f"SELECT count(*) FROM {table}")
-            report.rows_written[table] = int(cur.fetchone()[0])
-            log.info("loaded %-24s -> %8d row(s) in table", table, report.rows_written[table])
+            report.rows_in_table[table] = int(cur.fetchone()[0])
+            log.info("loaded %-24s -> %8d row(s) in table", table, report.rows_in_table[table])
 
     report.duration_seconds = time.time() - started
     return report
 
 
-def table_counts() -> dict[str, int]:
+# Rows the operational API creates carry this run_id. Comparing a live operational store
+# against the static source files only makes sense once they are excluded — otherwise every
+# POS transaction looks like drift. Reconciliation splits on the same value.
+API_RUN_ID = "api"
+
+
+def table_counts(*, bootstrap_only: bool = False) -> dict[str, int]:
+    """Row counts per table. `bootstrap_only` excludes anything the POS created since."""
+    where = f" WHERE run_id IS DISTINCT FROM '{API_RUN_ID}'" if bootstrap_only else ""
     with connection(read_only=False) as conn, conn.cursor() as cur:
         counts = {}
         for table in LOAD_ORDER:
-            cur.execute(f"SELECT count(*) FROM {table}")
+            cur.execute(f"SELECT count(*) FROM {table}{where}")
             counts[table] = int(cur.fetchone()[0])
         return counts

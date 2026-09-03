@@ -27,12 +27,16 @@ from airflow.sdk import dag, task
 )
 def rds_to_s3_incremental():
     @task
-    def export() -> dict:
+    def export(**context) -> dict:
         from aimternet.pipeline.curate.export_rds import export as run_export
 
         full = variable("aimternet_rds_export_full", "false").lower() == "true"
-        report = run_export(run_id="", full=full)
-        return {"rows": report.rows, "incremental": report.incremental}
+        report = run_export(run_id=context["run_id"], full=full)
+        return {
+            "moved": report.rows,
+            "snapshot": report.snapshot_rows,
+            "incremental": report.incremental,
+        }
 
     export()
 

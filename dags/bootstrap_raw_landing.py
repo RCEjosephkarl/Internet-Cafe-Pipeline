@@ -106,7 +106,7 @@ def bootstrap_raw_landing():
 
             report = load_all()
             return {
-                "rows": dict(report.rows_written),
+                "rows_in_table": dict(report.rows_in_table),
                 "backfilled_members": report.backfilled_members,
                 "policy": report.orphan_policy,
             }

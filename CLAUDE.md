@@ -57,6 +57,14 @@ in 0.2 s at 159 MB peak RSS. If you reintroduce pyarrow, re-run the stress test 
    `aws dynamodb delete-table`. Terraform in `infra/` manages *only* S3 config and the two DynamoDB
    tables — the pre-existing RDS and Redshift are deliberately out of its reach.
 8. **Airflow DAG files stay thin.** They import and call `src/aimternet/`; no business logic in `dags/`.
+9. **The RDS→S3 export leaves a snapshot, never a delta.** Gold reads
+   `silver/<table>_operational/` as the *current* state of the operational store, so an
+   incremental run merges its delta onto the previous snapshot by primary key before writing.
+   `tests/unit/test_export_rds_merge.py` pins this; reconciliation checks it directly
+   (`silver_snapshot:*`).
+10. **Terraform configures; it does not own.** `infra/` has no `aws_s3_bucket` resource (the
+    bucket is a data source), the two DynamoDB tables carry `prevent_destroy`, and RDS and
+    Redshift are absent entirely. `tests/unit/test_infra_terraform.py` enforces all three.
 
 ## Data findings that shape the code
 
@@ -72,6 +80,11 @@ in 0.2 s at 159 MB peak RSS. If you reintroduce pyarrow, re-run the stress test 
   Enabling DynamoDB TTL on it would purge ~61 of 62 days within ~48h. `AIMTERNET_DDB_TTL_ENABLED`
   defaults to `false`; the attribute is still written verbatim.
 - **D4** — every CSV is CRLF-terminated. Read with `encoding='utf-8-sig'` and `newline=''`.
+- **F7** — the first scheduled `rds_to_s3_incremental` after a bootstrap used to *replace*
+  `silver/members_operational` with the rows it had moved. `members_operational` fell from
+  1,200 rows to 4 and `dim_member` from 2,235 SCD2 versions to 8, and nothing failed:
+  reconciliation rated the dimension check `INFO`. Fixed in `curate/export_rds.py` (merge on
+  the primary key) and the check is now `CRITICAL`, alongside a per-snapshot count check.
 
 ## Commands
 
@@ -84,6 +97,8 @@ make bootstrap   # manifest -> Bronze -> validate -> RDS -> DynamoDB
 make curate      # Silver + Gold Parquet
 make redshift    # Redshift DDL + COPY/MERGE
 make reconcile   # cross-layer reconciliation report
+make docs        # regenerate docs/assumptions.md from poc_policy.py
+make infra-plan  # terraform init + plan (never apply without asking, never destroy)
 make api         # operational + metrics API on :8000, dashboard at /dashboard
 make airflow     # airflow standalone on :8080
 ```

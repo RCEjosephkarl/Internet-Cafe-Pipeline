@@ -25,6 +25,11 @@ from typing import Any
 from aimternet.config.poc_policy import EXPECTED_ORPHAN_MEMBER_COUNT, policy
 from aimternet.config.settings import settings
 
+#: Rows the API created. They are real business, not drift, and must not be compared against
+#: the source files -- a POS that never adds a row is a POS nobody is using. Defined once, by
+#: the loader that writes it.
+from aimternet.pipeline.loaders.rds import API_RUN_ID
+
 log = logging.getLogger(__name__)
 
 # Verified source-of-truth counts (spec §1.2, corrected for finding F6).
@@ -203,11 +208,6 @@ def _bronze_counts() -> dict[str, int]:
     return counts
 
 
-#: Rows the API created. They are real business, not drift, and must not be compared against
-#: the source files -- a POS that never adds a row is a POS nobody is using.
-API_RUN_ID = "api"
-
-
 def _rds_counts() -> tuple[dict[str, int], dict[str, int]]:
     """(rows loaded from the source files, rows created by the API), per table.
 
@@ -233,10 +233,23 @@ def _rds_counts() -> tuple[dict[str, int], dict[str, int]]:
     return bootstrap, operational
 
 
+# Snapshots the RDS -> S3 export writes into Silver, and the RDS table each mirrors. Gold
+# reads these as the *current* state of the operational store, so a delta left here in place
+# of a snapshot silently shrinks a dimension. That is not hypothetical: the first incremental
+# run after the bootstrap did exactly that to members_operational.
+OPERATIONAL_SNAPSHOTS = {
+    "members_operational": "members",
+    "workstations_operational": "workstations",
+    "concession_items_operational": "concession_items",
+    "rental_transactions_operational": "rental_transactions",
+    "concession_purchases_operational": "concession_purchases",
+}
+
+
 def _silver_gold_counts() -> tuple[dict[str, int], dict[str, int]]:
     from aimternet.pipeline.curate.engine import count_parquet, duck, layer_uri
 
-    silver_names = list(SOURCE_COUNTS)
+    silver_names = [*SOURCE_COUNTS, *OPERATIONAL_SNAPSHOTS]
     gold_names = [
         "dim_member", "dim_workstation", "dim_date", "dim_time", "dim_concession_item",
         "fact_rental", "fact_concession_sale", "fact_concession_line_item",
@@ -422,9 +435,13 @@ def reconcile(run_id: str = "", *, include_redshift: bool = True) -> Reconciliat
         report.skipped_layers.append(f"bronze ({exc})")
 
     # ---- source -> RDS
+    # Hoisted: the Silver/Gold block compares dimensions against these, and must not blow up
+    # with a NameError if RDS is unreachable — it should just skip those checks.
+    rds_bootstrap: dict[str, int] = {}
+    rds_operational: dict[str, int] = {}
     try:
-        bootstrap, operational = _rds_counts()
-        for table, actual in bootstrap.items():
+        rds_bootstrap, rds_operational = _rds_counts()
+        for table, actual in rds_bootstrap.items():
             expected = SOURCE_COUNTS.get(table, 0)
             if table == "members":
                 expected += EXPECTED_ORPHAN_MEMBER_COUNT  # D2 backfill is expected, not drift
@@ -439,7 +456,7 @@ def reconcile(run_id: str = "", *, include_redshift: bool = True) -> Reconciliat
                     ),
                 )
             )
-        created = sum(operational.values())
+        created = sum(rds_operational.values())
         if created:
             report.add(
                 Check(
@@ -449,7 +466,7 @@ def reconcile(run_id: str = "", *, include_redshift: bool = True) -> Reconciliat
                         "rows the POS created since the bootstrap, counted separately from "
                         "the source comparison: "
                         + ", ".join(
-                            f"{table} +{n}" for table, n in operational.items() if n
+                            f"{table} +{n}" for table, n in rds_operational.items() if n
                         )
                     ),
                 )
@@ -503,17 +520,43 @@ def reconcile(run_id: str = "", *, include_redshift: bool = True) -> Reconciliat
                     ),
                 )
             )
+        # dim_member is SCD2, so it holds at least one row per member and usually more.
+        # "At least" is the whole check: fewer rows than members means the dimension lost
+        # people, which is how the members_operational delta bug showed up. Expected comes
+        # from RDS, not a literal, so it stays true as members are added.
+        members_in_rds = rds_bootstrap.get("members", 0) + rds_operational.get("members", 0)
+        dim_member = gold.get("dim_member", 0)
         report.add(
             Check(
                 name="gold_rows:dim_member", layer_from="silver", layer_to="gold",
-                expected=1_200, actual=gold.get("dim_member", 0),
-                passed=gold.get("dim_member", 0) >= 1_200, severity=SEVERITY_INFO,
+                expected=members_in_rds, actual=dim_member,
+                passed=dim_member >= members_in_rds > 0,
+                severity=SEVERITY_CRITICAL,
                 detail=(
-                    f"SCD2: {gold.get('dim_member', 0)} versions across 1,200 members, so "
-                    f"more rows than members is correct"
+                    f"SCD2 on tier: {dim_member} version(s) across {members_in_rds} member(s). "
+                    "More rows than members is correct; fewer means the dimension lost members."
                 ),
             )
         )
+
+        # The snapshots Gold builds those dimensions from must themselves be complete.
+        for dataset, rds_table in OPERATIONAL_SNAPSHOTS.items():
+            expected_snapshot = rds_bootstrap.get(rds_table, 0) + rds_operational.get(rds_table, 0)
+            if not expected_snapshot:
+                continue
+            actual_snapshot = silver.get(dataset, 0)
+            report.add(
+                Check(
+                    name=f"silver_snapshot:{dataset}", layer_from="rds", layer_to="silver",
+                    expected=expected_snapshot, actual=actual_snapshot,
+                    passed=actual_snapshot == expected_snapshot,
+                    severity=SEVERITY_CRITICAL,
+                    detail=(
+                        "the RDS -> S3 export must leave a full snapshot in Silver, not the "
+                        "delta it moved; Gold reads this as current operational state"
+                    ),
+                )
+            )
         report.add(
             Check(
                 name="raw_telemetry_absent_from_gold", layer_from="", layer_to="",

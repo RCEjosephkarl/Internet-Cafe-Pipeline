@@ -6,6 +6,9 @@ import pytest
 
 pytestmark = pytest.mark.rds
 
+# What the *bootstrap* load put there. The POS writes to the same tables, so every count
+# below is taken with API-created rows excluded — otherwise a working till would fail the
+# suite, which is precisely backwards.
 EXPECTED = {
     "workstations": 175,
     "concession_items": 10,
@@ -20,7 +23,19 @@ EXPECTED = {
 def test_row_counts_match_the_source() -> None:
     from aimternet.pipeline.loaders.rds import table_counts
 
-    assert table_counts() == EXPECTED
+    assert table_counts(bootstrap_only=True) == EXPECTED
+
+
+def test_the_api_writes_into_the_same_tables_without_disturbing_the_bootstrap_rows() -> None:
+    """The two populations have to stay tellable apart, or nothing above can be asserted."""
+    from aimternet.pipeline.loaders.rds import table_counts
+
+    everything = table_counts()
+    bootstrap = table_counts(bootstrap_only=True)
+
+    assert bootstrap == EXPECTED
+    for table, total in everything.items():
+        assert total >= bootstrap[table], f"{table} lost bootstrap rows"
 
 
 def test_the_d2_cohort_is_present_flagged_and_exactly_840() -> None:
@@ -56,10 +71,18 @@ def test_no_orphan_foreign_keys_remain() -> None:
 
 
 def test_walk_in_purchases_have_a_null_rental_not_an_empty_string() -> None:
+    """D4/source quirk: the CSV carries "" for a walk-in. It must land as NULL, not as ""."""
     from aimternet.db.session import fetch_all
+    from aimternet.pipeline.loaders.rds import API_RUN_ID
 
-    rows = fetch_all("SELECT count(*) AS n FROM concession_purchases WHERE rental_id IS NULL")
+    rows = fetch_all(
+        "SELECT count(*) AS n FROM concession_purchases "
+        "WHERE rental_id IS NULL AND run_id IS DISTINCT FROM %s",
+        (API_RUN_ID,),
+    )
     assert rows[0]["n"] == 5293
+
+    # The empty string must not survive anywhere, API rows included.
     empty = fetch_all("SELECT count(*) AS n FROM concession_purchases WHERE rental_id = ''")
     assert empty[0]["n"] == 0
 
