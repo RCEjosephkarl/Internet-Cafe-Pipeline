@@ -67,7 +67,8 @@ make bootstrap            # landing -> S3 Bronze -> validate -> RDS + DynamoDB
 make curate               # Silver -> RDS export -> Gold
 make redshift             # Gold -> aimternet_olap
 make reconcile            # the report that says whether all of that was true
-make api                  # :8000, dashboard at /dashboard
+make api                  # :8000
+make streamlit             # :8501, dashboard (HTTP-only client of the metrics API)
 make airflow              # :8080
 ```
 
@@ -79,7 +80,7 @@ make airflow              # :8080
 |---|---|---|
 | `bootstrap_raw_landing` | manual | EC2 landing -> Bronze -> RDS + DynamoDB. The only DAG that reads the landing directory |
 | `rds_to_s3_incremental` | `0 * * * *` | RDS -> Silver operational snapshots |
-| `dynamodb_to_s3_incremental` | `15 * * * *` | Recent events -> Silver |
+| `dynamodb_to_s3_incremental` | `15 * * * *` | API-emitted events -> Silver snapshot -> Gold |
 | `curate_silver_gold` | `30 * * * *` | Bronze -> Silver -> Gold |
 | `load_redshift` | `45 * * * *` | Gold -> Redshift |
 | `reconcile_data` | `0 */6 * * *` | Every layer against every other |
@@ -120,7 +121,7 @@ DynamoDB.
 | `notebooks/pos_terminal.ipynb` | Front-desk POS — check members in/out, sell concessions. HTTP to the API only, no DB access, no credentials (invariant #3). | `make api` running. |
 | `notebooks/airflow_lens.ipynb` | Observe and control DAGs, runs, tasks, Variables and pools via the Airflow REST API — no DAG source edits. | `make airflow` running as `standalone` (api-server alone shows scheduler/triggerer as `unhealthy`). |
 | `notebooks/db_lens.ipynb` | Read-only explorer over RDS (`aimternet_oltp`) and Redshift (`aimternet_olap`), via the `aimternet_ro` role in a `READ ONLY` transaction. | RDS migrated (`make migrate` / `make bootstrap`) for the OLTP half; `make redshift` for the OLAP half. No service needs to be running — it connects to the databases directly. |
-| `notebooks/dashboard_lens.ipynb` | Exercises every `/v1/metrics/*` endpoint and links to the live dashboard. | `make api` running, with data in RDS, Redshift and DynamoDB to get meaningful numbers (`make bootstrap` + `make curate` + `make redshift`). |
+| `notebooks/dashboard_lens.ipynb` | Exercises every `/v1/metrics/*` endpoint and links to the live Streamlit dashboard. | `make api` running, with data in RDS, Redshift and DynamoDB to get meaningful numbers (`make bootstrap` + `make curate` + `make redshift`). |
 
 Typical order: `make bootstrap` (or trigger it from `airflow_lens.ipynb` once `make airflow` is up) →
 `make api` for `pos_terminal.ipynb` and the OLTP half of `db_lens.ipynb` → `make curate` +

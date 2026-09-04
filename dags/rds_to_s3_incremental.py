@@ -10,14 +10,14 @@ Watermarked on ``updated_at``, so a scheduled run moves only what changed.
 from __future__ import annotations
 
 import pendulum
-from _common import DEFAULT_ARGS, TAGS, variable
+from _common import DEFAULT_ARGS, SILVER_RDS, TAGS, variable
 from airflow.sdk import dag, task
 
 
 @dag(
     dag_id="rds_to_s3_incremental",
     description="Incremental export of operational tables from RDS into S3 Silver",
-    schedule="0 * * * *",
+    schedule="*/15 * * * *",
     start_date=pendulum.datetime(2026, 9, 1, tz="UTC"),
     catchup=False,
     default_args=DEFAULT_ARGS,
@@ -26,7 +26,7 @@ from airflow.sdk import dag, task
     doc_md=__doc__,
 )
 def rds_to_s3_incremental():
-    @task
+    @task(outlets=[SILVER_RDS])
     def export(**context) -> dict:
         from aimternet.pipeline.curate.export_rds import export as run_export
 

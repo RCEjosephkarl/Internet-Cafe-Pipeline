@@ -10,14 +10,14 @@ loader probes for that at run time and records which path it took, rather than a
 from __future__ import annotations
 
 import pendulum
-from _common import DEFAULT_ARGS, TAGS
+from _common import DEFAULT_ARGS, GOLD, TAGS
 from airflow.sdk import dag, task
 
 
 @dag(
     dag_id="load_redshift",
     description="Load the Gold layer into the Redshift dimensional model",
-    schedule="45 * * * *",
+    schedule=[GOLD],
     start_date=pendulum.datetime(2026, 9, 1, tz="UTC"),
     catchup=False,
     default_args=DEFAULT_ARGS,

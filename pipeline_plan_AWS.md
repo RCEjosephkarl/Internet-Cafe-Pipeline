@@ -187,6 +187,14 @@ Layer responsibilities — preserve these boundaries:
 | Operational API | the **only** write path for POS |
 | POS notebook | HTTP client, nothing else |
 
+> **Deviation (2026-09-03):** §7.4 and the references to "the dashboard" below describe a
+> static HTML/JS page served by the operational API at `/dashboard`. That page was replaced
+> by a Streamlit app (`streamlit_app/`, `make streamlit`, port 8501) with three sections —
+> PC Telemetry, Descriptive Analytics, Data Science. The constraint on the next line is
+> unchanged and still enforced (now by `tests/unit/test_streamlit_boundary.py`): the
+> dashboard talks to `/v1/metrics/*` over HTTP only, regardless of which UI framework renders
+> it. See CLAUDE.md.
+
 Hard prohibitions:
 - The POS notebook must not import `psycopg`, `sqlalchemy`, or `boto3`, contain SQL, or hold credentials.
 - The dashboard must not query RDS, Redshift, or DynamoDB directly.

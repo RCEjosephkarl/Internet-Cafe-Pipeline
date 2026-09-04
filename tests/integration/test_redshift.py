@@ -13,19 +13,34 @@ import pytest
 
 pytestmark = pytest.mark.redshift
 
+#: Only the single-origin dimensions can be literals. dim_member is SCD2 over a membership
+#: the POS adds to, and every fact draws on an operational snapshot as well, so both are
+#: derived from Gold -- which is where Redshift's rows come from, and therefore the only
+#: honest thing to compare them against.
 EXPECTED = {
-    "dim_member": 2_235,            # SCD2: versions, not members
     "dim_workstation": 175,
     "dim_date": 365,
     "dim_time": 1_440,
     "dim_concession_item": 10,
-    "fact_rental": 28_287,
-    "fact_concession_sale": 21_077,
-    "fact_concession_line_item": 29_672,
-    "fact_points_activity": 55_514,
-    "fact_workstation_event": 58_218,
     "agg_workstation_utilization_hourly": 175 * 24 * 62,
 }
+
+
+def _derived_expected() -> dict[str, int]:
+    """The tables whose counts move with the business, read from Gold and S3."""
+    from aimternet.pipeline.curate.engine import count_parquet, duck, layer_uri
+    from aimternet.pipeline.reconcile import unioned_fact_expectations
+
+    expected = unioned_fact_expectations()
+    with duck() as connection:
+        expected["dim_member"] = count_parquet(connection, layer_uri("gold", "dim_member"))
+    return expected
+
+
+def _rental_count() -> int:
+    from aimternet.pipeline.reconcile import unioned_fact_expectations
+
+    return unioned_fact_expectations()["fact_rental"]
 
 
 @pytest.fixture(scope="module")
@@ -38,7 +53,7 @@ def schema() -> str:
 def test_every_table_matches_gold() -> None:
     from aimternet.pipeline.loaders.redshift import table_counts
 
-    assert table_counts() == EXPECTED
+    assert table_counts() == {**EXPECTED, **_derived_expected()}
 
 
 def test_no_money_column_is_floating_point(schema: str) -> None:
@@ -62,7 +77,7 @@ def test_revenue_by_zone_is_sensible(schema: str) -> None:
     assert len(rows) == 3
     by_zone = {r["zone_classification"]: r for r in rows}
     assert set(by_zone) == {"Standard Zone", "VIP Esports Zone", "Streamer Pods"}
-    assert sum(r["rentals"] for r in rows) == 28_287
+    assert sum(r["rentals"] for r in rows) == _rental_count()
     assert all(Decimal(r["revenue"]) > 0 for r in rows)
     # Standard Zone has 100 of the 175 workstations, so it should host the most rentals.
     assert max(rows, key=lambda r: r["rentals"])["zone_classification"] == "Standard Zone"
@@ -92,7 +107,9 @@ def test_scd2_dimension_joins_to_facts(schema: str) -> None:
         f"""SELECT count(*) AS n FROM {schema}.fact_rental f
             JOIN {schema}.dim_member d ON d.member_id = f.member_id AND d.is_current"""
     )
-    assert rows[0]["n"] == 28_287, "every rental must join exactly one current member version"
+    assert rows[0]["n"] == _rental_count(), (
+        "every rental must join exactly one current member version"
+    )
 
 
 def test_the_d2_cohort_is_visible_in_the_warehouse(schema: str) -> None:

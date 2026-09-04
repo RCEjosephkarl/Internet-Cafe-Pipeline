@@ -90,6 +90,26 @@ variable "noncurrent_version_expiration_days" {
   default     = 30
 }
 
+variable "manage_redshift_copy_role" {
+  description = <<-EOT
+    Create the Redshift COPY role on its own, without the EC2 pipeline role.
+
+    Split out from manage_iam because the two roles have different answers. The EC2 role
+    duplicates an instance profile that already exists in this shared account, so it stays
+    off. The COPY role duplicates nothing: it is the missing half of the
+    REDSHIFT_LOADS_VIA_INSERT gap, and creating it is entirely inside what Terraform owns
+    here.
+
+    Creating it is not enough to switch the loader to COPY. The role must then be ATTACHED to
+    the cluster, which Terraform deliberately cannot do (invariant 10: Redshift is not ours to
+    modify, and the IAM user cannot call redshift:DescribeClusters in any case). Attach it in
+    the console, set AIMTERNET_REDSHIFT_COPY_IAM_ROLE to the ARN this outputs, and the loader
+    probes for it and switches strategy on the next run. See docs/runbook.md.
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "manage_iam" {
   description = <<-EOT
     Create the two least-privilege IAM roles from spec §8 (EC2 pipeline role, Redshift COPY

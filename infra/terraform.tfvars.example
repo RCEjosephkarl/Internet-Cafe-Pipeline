@@ -31,3 +31,8 @@ adopt_existing_dynamodb_tables = true
 # Leave false in a shared account: the EC2 instance profile already exists and the Redshift
 # cluster is not ours to modify.
 manage_iam = false
+
+# The Redshift COPY role on its own. Creating it is safe and duplicates nothing; it must then
+# be attached to the cluster by hand (Terraform cannot — see docs/runbook.md) and its ARN put
+# in AIMTERNET_REDSHIFT_COPY_IAM_ROLE. Until then the loader stays on batched INSERT.
+manage_redshift_copy_role = false

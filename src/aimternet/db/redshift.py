@@ -7,6 +7,9 @@ and whichever one works is reported rather than assumed:
 2. ``IAM_ROLE default`` -- works when the cluster has a default role attached,
 3. no role, in which case the loader falls back to batched INSERT and says so.
 
+The third case is decided by ``probe_copy_capability``, which tries a COPY and reads the
+error, rather than by ``copy_credentials_clause``, which only ever builds a clause.
+
 Inline access keys are never an option (spec §6.5).
 """
 
@@ -69,11 +72,18 @@ def fetch_all(sql: str, params: tuple[Any, ...] | None = None) -> list[dict[str,
         return [dict(zip(columns, row, strict=True)) for row in cur.fetchall()]
 
 
-def copy_credentials_clause() -> str | None:
-    """The ``IAM_ROLE`` clause for a COPY, or None when no role is available.
+def copy_credentials_clause() -> str:
+    """The ``IAM_ROLE`` clause for a COPY.
 
-    Returning None is a real answer, not a failure: the caller falls back to batched INSERT
-    and records the gap in the run report instead of pretending COPY worked.
+    Two cases, not three. Either ``AIMTERNET_REDSHIFT_COPY_IAM_ROLE`` names a role, or the
+    clause asks the cluster for its default one -- and whether that default exists is not
+    something this function can know, so it does not guess. ``probe_copy_capability`` answers
+    that by trying it, and ``choose_strategy`` falls back to batched INSERT when the answer is
+    no.
+
+    This used to be typed ``str | None`` with a docstring promising None "when no role is
+    available", and no code path that returned it. Had one ever been added, the caller's
+    f-string would have emitted the literal ``COPY ... None FORMAT AS PARQUET``.
     """
     configured = settings().redshift_copy_iam_role.strip()
     if configured:

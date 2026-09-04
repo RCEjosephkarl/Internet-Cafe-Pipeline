@@ -28,6 +28,27 @@ DEFAULT_ARGS: dict[str, Any] = {
 
 TAGS = ["aimternet"]
 
+# --------------------------------------------------------------------------------------
+# Assets: what each stage produces, so the next stage runs when it lands rather than at a
+# clock slot it hopes is late enough. The four DAGs used to be staggered on cron (:00, :15,
+# :30, :45), which put a POS sale up to 1h45m away from the dashboard and, worse, let
+# `load_redshift` fire on a Gold build that `curate` had not finished writing. Airflow 3
+# calls these Assets; `airflow.datasets` no longer exists on 3.3.
+# --------------------------------------------------------------------------------------
+
+try:
+    from airflow.sdk import Asset
+
+    # One asset per producer, not one shared "operational" asset: a list schedule in
+    # Airflow is AND, so `schedule=[SILVER_RDS, SILVER_DYNAMODB]` waits for both exports the
+    # way the old :00/:15/:30 stagger was trying to. A single shared asset would be OR, and
+    # would rebuild Gold twice per cycle off half-updated Silver.
+    SILVER_RDS = Asset("s3://aimternet/silver/rds_operational")
+    SILVER_DYNAMODB = Asset("s3://aimternet/silver/dynamodb_operational")
+    GOLD = Asset("s3://aimternet/gold")
+except Exception:  # pragma: no cover - keeps a bare import of this module working
+    SILVER_RDS = SILVER_DYNAMODB = GOLD = None  # type: ignore[assignment]
+
 
 def variable(key: str, default: str) -> str:
     """Read an Airflow Variable, falling back to a default.
