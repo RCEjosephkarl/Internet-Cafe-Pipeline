@@ -13,7 +13,7 @@ AIRFLOW_HOME  ?= $(HOME)/airflow
 
 export PYTHONPATH := $(REPO_ROOT)/src
 
-.PHONY: help env link test lint typecheck check migrate assumptions docs infra-plan validate \
+.PHONY: help env link test lint typecheck check migrate assumptions docs erd infra-plan validate \
         quarantine-demo manifest bronze \
         bootstrap load-rds load-dynamodb curate redshift \
         reconcile api metrics airflow streamlit clean
@@ -46,10 +46,10 @@ test-all: ## Run every test, including the ones that need live AWS resources
 	$(PY) -m pytest
 
 lint: ## ruff
-	$(PY) -m ruff check src tests dags
+	$(PY) -m ruff check src tests dags streamlit_app
 
 format: ## ruff --fix + format
-	$(PY) -m ruff check --fix src tests dags
+	$(PY) -m ruff check --fix src tests dags streamlit_app
 	$(PY) -m ruff format src tests dags
 
 typecheck: ## mypy on src/aimternet
@@ -66,6 +66,9 @@ assumptions: ## Show every POC policy decision and its evidence
 docs: ## Regenerate the docs rendered from code (docs/assumptions.md)
 	$(PY) -m aimternet.pipeline.cli assumptions --markdown > docs/assumptions.md
 	@echo "wrote docs/assumptions.md"
+
+erd: ## Regenerate docs/aimternet_erd.drawio from the DDL
+	$(PY) scripts/gen_erd_drawio.py
 
 infra-plan: ## terraform plan for infra/ — read-only; apply needs approval, destroy never
 	cd infra && terraform init -input=false && terraform plan -input=false

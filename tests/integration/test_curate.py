@@ -20,37 +20,26 @@ SILVER_EXPECTED = {
     "telemetry": 6_300_000,
 }
 
+#: Only the datasets with a single, immutable origin can be literals. Every fact drawing on
+#: an operational snapshot as well is derived -- see `reconcile.unioned_fact_expectations()`.
+#: A constant for those would fail on any bucket where the cafe has been open, and pinning
+#: them to the Bronze count is exactly what let POS rows go missing: the number that "proved"
+#: Gold was correct was the number that could not see them.
 GOLD_EXPECTED = {
     "dim_workstation": 175,
     "dim_date": 365,
     "dim_time": 1_440,
     "dim_concession_item": 10,
-    "fact_rental": 28_287,
-    "fact_concession_sale": 21_077,
-    "fact_concession_line_item": 29_672,
-    "fact_points_activity": 55_514,
-    # fact_workstation_event is derived, not frozen -- see _events_expected().
-    # 175 workstations x 24 hours x 62 days
+    # 175 workstations x 24 hours x 62 days. Telemetry has no POS write path.
     "agg_workstation_utilization_hourly": 260_400,
 }
 
 
-def _events_expected() -> int:
-    """Bronze events plus whatever the POS has emitted since.
+def _derived_expected() -> dict[str, int]:
+    """Bronze plus whatever the POS has written since, for each two-origin fact."""
+    from aimternet.pipeline.reconcile import unioned_fact_expectations
 
-    Not a literal. fact_workstation_event is the one fact with two sources -- the 58,218
-    Bronze events and the API-emitted ones the DynamoDB export leaves in
-    `workstation_events_operational` -- so a constant here fails on any bucket where the cafe
-    has been open. Pinning it to the Bronze count is also what let those events go missing:
-    the number that "proved" Gold was correct was the number that could not see them.
-    """
-    from aimternet.pipeline.curate.engine import count_parquet, duck, layer_uri
-
-    with duck() as connection:
-        operational = count_parquet(
-            connection, layer_uri("silver", "workstation_events_operational")
-        )
-    return 58_218 + operational
+    return unioned_fact_expectations()
 
 
 @pytest.fixture(scope="module")
@@ -75,23 +64,30 @@ def test_gold_reconciles_to_silver(con, dataset: str) -> None:
     assert count_parquet(con, layer_uri("gold", dataset)) == GOLD_EXPECTED[dataset]
 
 
-def test_the_api_emitted_events_reach_gold(con) -> None:
-    """Every event in the operational snapshot must be in fact_workstation_event.
+def test_the_pos_written_rows_reach_gold(con) -> None:
+    """Every row in an operational snapshot must be in the fact built from it.
 
-    The export wrote its delta over that snapshot hourly and Gold read Bronze alone, so POS
-    sessions stopped at Silver. Asserted against the live layers, not a constant.
+    All five of these facts read Bronze alone at some point in this POC's life, so a rental,
+    a sale, its line items, its points and its session events all stopped at Silver. Asserted
+    against the live layers, never a constant: a constant is what made the gap invisible.
     """
     from aimternet.pipeline.curate.engine import count_parquet, layer_uri
 
-    assert count_parquet(con, layer_uri("gold", "fact_workstation_event")) == _events_expected()
+    for fact, expected in _derived_expected().items():
+        assert count_parquet(con, layer_uri("gold", fact)) == expected, fact
 
 
 def test_no_float_columns_survive_into_silver_or_gold(con) -> None:
     """Spec §5: no float columns for money in any schema, including Parquet."""
     from aimternet.pipeline.curate.engine import layer_uri
 
+    # Every Gold dataset, not just the ones with a literal expectation. The facts moved out
+    # of GOLD_EXPECTED when their counts stopped being constants, and letting this loop
+    # follow them out would have quietly dropped the money columns -- which are the only
+    # columns this test exists for -- from the check.
+    gold_datasets = (*GOLD_EXPECTED, *_derived_expected())
     offenders = []
-    for layer, datasets in (("silver", SILVER_EXPECTED), ("gold", GOLD_EXPECTED)):
+    for layer, datasets in (("silver", SILVER_EXPECTED), ("gold", gold_datasets)):
         for dataset in datasets:
             uri = f"{layer_uri(layer, dataset)}/**/*.parquet"
             for name, dtype, *_ in con.execute(

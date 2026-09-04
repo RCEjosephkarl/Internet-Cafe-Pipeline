@@ -69,8 +69,24 @@ def test_every_exported_table_can_be_bounded() -> None:
         assert watermark_column, f"{table} has no watermark column to bound the count by"
 
 
-@pytest.mark.parametrize("dataset", sorted(reconcile.OPERATIONAL_SNAPSHOTS))
-def test_each_snapshot_maps_to_an_exported_table(dataset: str) -> None:
+def test_every_exported_table_has_a_snapshot_check() -> None:
+    """The mapping is derived from EXPORTS, so asserting it maps back proves nothing.
+
+    What is worth asserting is coverage in the direction that can actually go wrong: a table
+    added to the export must acquire a `silver_snapshot:*` check, never arrive without one.
+    Two hand-written lists of the same tables is how dim_member ended up as the single
+    warehouse table whose count nothing checked.
+    """
     from aimternet.pipeline.curate.export_rds import EXPORTS
 
-    assert reconcile.OPERATIONAL_SNAPSHOTS[dataset] in EXPORTS
+    assert {f"{table}_operational" for table in EXPORTS} == set(reconcile.OPERATIONAL_SNAPSHOTS)
+
+
+@pytest.mark.parametrize("fact", sorted(reconcile.UNIONED_FACTS))
+def test_every_unioned_fact_names_a_real_bronze_dataset(fact: str) -> None:
+    """The expectation is `SOURCE_COUNTS[bronze] + contribution`; a typo in `bronze` would
+    raise a KeyError deep inside a `try` that turns it into a skipped layer."""
+    bronze, snapshot, key = reconcile.UNIONED_FACTS[fact]
+    assert bronze in reconcile.SOURCE_COUNTS, f"{fact} names an unverified Bronze dataset"
+    assert key, f"{fact} has no key to dedupe its two origins on"
+    assert snapshot in reconcile.OPERATIONAL_SNAPSHOTS or snapshot == reconcile.EVENTS_SNAPSHOT

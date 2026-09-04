@@ -40,7 +40,16 @@ TABLES: dict[str, tuple[str, tuple[str, ...]]] = {
     # after an F7-style shrink from 2,235 versions to 8, Redshift keeps 8 fresh rows and
     # 2,227 stale ones, with duplicate member_ids and several is_current rows apiece. The row
     # count does not fall, so no count check can see it.
-    "dim_member": ("dim_member", ("member_id", "valid_from_utc")),
+    #
+    # `valid_from_utc` was not enough either, for the same reason: Gold recomputes it. A
+    # member with no source rentals gets one version dated from their registration; their
+    # first POS rental moves them onto the rental-derived branch and the version is redated
+    # to that session. The old key is no longer staged, so the delete misses it and the
+    # member ends up with two rows, both is_current -- F8's shape again, one layer along.
+    # member_id is the only column Gold does not recompute, and the whole dimension is
+    # rebuilt and staged on every load, so deleting every version of each staged member and
+    # reinserting is complete by construction.
+    "dim_member": ("dim_member", ("member_id",)),
     "dim_workstation": ("dim_workstation", ("workstation_key",)),
     "dim_date": ("dim_date", ("date_id",)),
     "dim_time": ("dim_time", ("time_id",)),

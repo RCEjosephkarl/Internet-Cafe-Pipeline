@@ -81,10 +81,12 @@ pyarrow now co-installed also came back clean (0/15).
    and `export_dynamodb` — which imports that module's watermark helpers — wrote its delta
    over `workstation_events_operational` hourly for its whole life. Nothing failed, because
    **no query read the dataset**: a snapshot nobody reads cannot be observed to be wrong.
-   `tests/unit/test_operational_snapshots_are_consumed.py` now requires every snapshot to be
-   read by Gold or declared unread with a reason. Four still are — `rental_transactions`,
-   `concession_purchases`, `workstations`, `concession_items` — so POS rentals and purchases
-   do not yet reach the warehouse. That gap is declared, not hidden.
+   `tests/unit/test_operational_snapshots_are_consumed.py` requires every snapshot to be read
+   by Gold or declared unread with a reason, and `CONSUMED_SNAPSHOTS` pins the six that carry
+   money so they cannot be declared away again. Only two are unread now —
+   `workstations_operational` and `concession_items_operational` — and for a stated reason:
+   the one column each adds (`status`, `stock_quantity`) is a fast-changing measure that does
+   not belong in a Type-1 dimension. See F9.
 10. **Terraform configures; it does not own.** `infra/` has no `aws_s3_bucket` resource (the
     bucket is a data source), the two DynamoDB tables carry `prevent_destroy`, and RDS and
     Redshift are absent entirely. `tests/unit/test_infra_terraform.py` enforces all three.
@@ -119,11 +121,81 @@ pyarrow now co-installed also came back clean (0/15).
 
   Found alongside it, same class, also fixed: Redshift merged `dim_member` on `member_key`, a
   `row_number()` Gold recomputes every build — a shrink left stale rows behind with the count
-  unchanged (now keyed on `(member_id, valid_from_utc)`); `dim_member` was the one table
-  missing from the Redshift expectations dict, so its count check was `INFO` and always passed;
+  unchanged (rekeyed to `(member_id, valid_from_utc)`, and to `member_id` alone in F9);
+  `dim_member` was the one table missing from the Redshift expectations dict, so its count
+  check was `INFO` and always passed;
   and `ReconciliationReport.passed` ignored `skipped_layers`, so any layer that threw removed
   all of its `CRITICAL` checks and the run went green. See `docs/runbook.md` for the one-time
   `dim_member` cleanup this requires.
+
+- **F9** — the same class again, and the last of it. `fact_rental` and `fact_concession_sale`
+  were built from Bronze-derived Silver, so the 169 rentals and 39 purchases the POS had
+  taken reached RDS, reached `silver/*_operational`, and stopped. Two tables were worse off:
+  `concession_order_items` and `member_points_ledger` were not in `export_rds.EXPORTS` **at
+  all**, so they had no snapshot — and a table with no snapshot is invisible to the test that
+  checks every snapshot has a reader. Fixed by exporting both and unioning all four
+  operational snapshots into Gold (`curate/gold.py::operational_source`), which uses
+  `NOT EXISTS` rather than a `source_file` tie-break: the RDS snapshots are a *superset* of
+  Bronze, so all 28,287 bootstrap rentals sit in both origins and an ordering tie-break would
+  pick between identical `source_file` values at random on every build.
+
+  Found alongside it, same class, also fixed: every fact count in `reconcile.py` and in the
+  integration tests was a frozen literal that was correct only because Gold could not see the
+  POS — now `SOURCE_COUNTS[bronze] + contribution`, derived; `dim_member` merged on
+  `(member_id, valid_from_utc)`, but Gold *recomputes* `valid_from_utc`, so a member's first
+  POS rental redates their version and orphans the old row with `is_current` still true (now
+  keyed on `member_id` alone); the export stamped its watermark from the worker's clock while
+  filtering on the database's, which for the two append-only tables would skip a row
+  permanently (now `SELECT now()` from RDS); and nine metrics endpoints capped `days` at 62,
+  which silently truncates a window that no longer stops growing.
+
+- **F10** — the same class one layer further along, and this time in the *serving* code
+  rather than the pipeline. `/v1/metrics/revenue/trend` built its daily concession column by
+  joining `fact_concession_sale` to `fact_concession_line_item` and then summing the **sale**
+  total, so a purchase with three lines was counted three times. Concession revenue on the
+  dashboard's headline chart read ₱4,778,800 against an actual ₱2,862,820 — inflated ×1.669,
+  which is exactly the mean lines per purchase — and `gross_profit`, `total_revenue` and
+  `avg_transaction_value` all inherited it.
+
+  Nothing caught it for the reason everything in F7–F9 went uncaught: **the only test was
+  internal to the row.** `test_revenue_trend_totals_equal_the_sum_of_its_parts` asserted
+  `total == rental + concession`, which a wrong `concession` satisfies perfectly. The fix is
+  the query (sale-grain measures from the sale fact alone, margin in its own CTE joined by
+  day) and, more importantly, a test that compares two *independent* paths over the same
+  facts: `payment_mix` reads `fact_concession_sale` directly, so
+  `sum(daily) == sum(payment_mix)` must hold. It now does, to the peso, and the day the POS
+  wrote also matches `/revenue/today`'s RDS figure exactly.
+
+  The rule this leaves: **an aggregate over a join is a fan-out until proven otherwise.**
+  Measures at different grains do not belong in one `GROUP BY` — put each at its own grain
+  and join the results. And a cross-check is only a check if the two sides can disagree.
+
+## The dashboard
+
+Two Streamlit pages under `streamlit_app/pages/`, and the split is by what a reader is
+looking for, not by which store answered:
+
+* **PC Telemetry** — floor status, per-peripheral connectivity, compute, network, the
+  utilization heatmap, and workstation events. Live from RDS + DynamoDB except the heatmap
+  and the event summary.
+* **Business Analytics** — money, membership activity, and a per-member summary. Today's
+  figures and anything about a single member come from RDS, so they match the till exactly.
+
+Three things about it are load-bearing:
+
+1. **`streamlit_app/lib/charts.py` owns every chart's appearance.** Pages say what they plot;
+   that module says how it looks. Categorical colours are assigned in a **fixed slot order
+   and never cycled** — that ordering is what keeps the palette colour-blind-safe, so sorting
+   or recycling it silently breaks accessibility. It also caps the slots: past four series the
+   answer is a table or a facet, never a generated hue. `show()` passes `theme=None` because
+   Streamlit's own plotly theme would repaint the traces and undo all of it.
+2. **No dual-axis charts.** Two measures on different scales get two charts. Revenue and
+   gross profit are plotted separately for exactly this reason.
+3. **The peripheral cards are one instant** — the latest reading per machine, from DynamoDB.
+   Gold drops the peripheral columns, so there is no historical per-peripheral series; the
+   history lives in `fact_workstation_event` as `PERIPHERAL_ALERT`, which the events section
+   reads. In this dataset only the headset ever disconnects (~3% of readings), so an
+   all-connected snapshot is the normal case, not a broken card.
 
 ## Commands
 

@@ -1,7 +1,7 @@
 """AIMternet-Cafe operations dashboard — Streamlit entry point.
 
-Three sections live under ``pages/``: PC Telemetry, Descriptive Analytics, Data Science. This
-page is the landing page plus the shared sidebar time-window control every page re-renders.
+Two sections live under ``pages/``: PC Telemetry and Business Analytics. This page is the
+landing page plus the shared sidebar time-window control every page re-renders.
 Talks to the operational API over HTTP only (``lib/api_client.py``) — no database credentials
 live in this process. See CLAUDE.md.
 """
@@ -37,13 +37,16 @@ st.markdown(
     """
 Use the sidebar to pick a time window, then open a section from the left:
 
-- **PC Telemetry** — live fleet status, hardware health, utilization (RDS + DynamoDB, live).
-- **Descriptive Analytics** — revenue, points, member composition (mixed: today's numbers are
-  live from RDS, trends are a Redshift warehouse snapshot).
-- **Data Science** — derived scoring: member engagement leaderboard, tier migration, PC health
-  ranking, revenue efficiency (Redshift warehouse snapshot — descriptive math, not ML).
+- **PC Telemetry** — the floor and the fleet: per-peripheral connectivity, compute and network
+  health (live, from RDS and DynamoDB), the utilization heatmap, and workstation events.
+- **Business Analytics** — money, membership activity, and a per-member summary. Today's
+  numbers and anything about a single member are live from RDS; the trends come from Redshift.
 
-Every Redshift-sourced card is labeled and carries its own `window` — the warehouse holds a
-fixed 62-day bootstrap batch, so "live" only ever applies to the RDS-sourced cards.
+Redshift sees the till: a rental or sale rung up on the POS reaches these cards on the next
+pipeline pass. Each stage now triggers the next off the data it produced rather than waiting
+for a clock slot, and the exports run every 15 minutes, so a Redshift-sourced card trails an
+RDS-sourced one by about that. Every Redshift-sourced card is labeled and carries its own
+`window`. "Refresh data" in the sidebar clears this dashboard's cache when you know a pass
+has just landed.
 """
 )

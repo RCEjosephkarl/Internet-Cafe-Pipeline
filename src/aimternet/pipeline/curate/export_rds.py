@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 
 import duckdb
 import pandas as pd
@@ -43,6 +43,18 @@ EXPORTS: dict[str, tuple[str, str]] = {
     "concession_items": ("updated_at", "item_sku"),
     "rental_transactions": ("updated_at", "rental_id"),
     "concession_purchases": ("updated_at", "purchase_id"),
+    # Append-only, and the only two with no `updated_at` at all: a ledger entry and an order
+    # line are facts about a moment, never restated. `created_at` is therefore both the insert
+    # time and the last-change time, which is exactly what a watermark needs.
+    #
+    # These were absent for the POC's whole life, and nothing noticed, because the test that
+    # checks every snapshot has a reader can only see snapshots that exist. A table that is
+    # never exported has no snapshot to declare unread -- so the gap it leaves is invisible to
+    # the check built to find exactly that gap. fact_points_activity and
+    # fact_concession_line_item were Bronze-only as a result: a POS sale would have reached
+    # the warehouse with no lines and no points.
+    "concession_order_items": ("created_at", "order_item_id"),
+    "member_points_ledger": ("created_at", "ledger_id"),
 }
 
 
@@ -108,7 +120,14 @@ def export(run_id: str, *, full: bool = False) -> ExportReport:
     its delta onto the previous one rather than replacing it.
     """
     report = ExportReport(incremental=not full)
-    now = datetime.now(UTC)
+    # The database's clock, not this process's. The watermark is compared against
+    # `updated_at`/`created_at`, which Postgres stamps with its own `now()`; taking the
+    # bound from the worker instead means any skew between the two silently skips rows
+    # written inside it. For `rental_transactions` a later check-out re-touches `updated_at`
+    # and the row heals, but `member_points_ledger` and `concession_order_items` are
+    # append-only -- nothing ever updates them again, so a row skipped once is skipped
+    # forever. One clock removes the question.
+    now = fetch_all("SELECT now() AS now")[0]["now"]
 
     with duck() as con:
         for table, (watermark_column, key) in EXPORTS.items():

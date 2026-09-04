@@ -7,14 +7,14 @@ Reads S3, never the EC2 landing directory: after the bootstrap, S3 is the source
 from __future__ import annotations
 
 import pendulum
-from _common import DEFAULT_ARGS, TAGS, int_variable
+from _common import DEFAULT_ARGS, GOLD, SILVER_DYNAMODB, SILVER_RDS, TAGS, int_variable
 from airflow.sdk import dag, task
 
 
 @dag(
     dag_id="curate_silver_gold",
     description="Build the Silver and Gold layers from S3 Bronze",
-    schedule="30 * * * *",
+    schedule=[SILVER_RDS, SILVER_DYNAMODB],
     start_date=pendulum.datetime(2026, 9, 1, tz="UTC"),
     catchup=False,
     default_args=DEFAULT_ARGS,
@@ -32,7 +32,7 @@ def curate_silver_gold():
         report = build(run_id, telemetry_days=days)
         return {"rows": report.rows, "seconds": round(report.duration_seconds, 1)}
 
-    @task
+    @task(outlets=[GOLD])
     def build_gold(**context) -> dict:
         from aimternet.pipeline.curate.gold import build
 
@@ -46,19 +46,28 @@ def curate_silver_gold():
     @task
     def check_counts(silver: dict, gold: dict) -> str:
         """Fail the run if Gold lost rows Silver had — the point of curating is not to."""
-        # Derived, never a constant. fact_workstation_event draws on two sources: the Bronze
-        # events in Silver and the API-emitted ones the DynamoDB export leaves alongside them.
-        # Comparing it against Bronze alone would fail every run in which the POS was used —
-        # and, before it did that, hid the fact that those events never arrived at all.
+        # Derived, never a constant. Every one of these facts draws on two sources: the
+        # Bronze-derived dataset in Silver, and whatever the POS has written since, which the
+        # exports leave alongside it. Comparing against Bronze alone fails every run in which
+        # the cafe was open — and, before it did that, hid the fact that POS rows never
+        # arrived at all. Four of these five read Bronze-only until that gap was closed.
         operational = gold.get("operational", {})
+
+        def expect(bronze: str) -> int:
+            """Bronze rows plus what the snapshot *contributes* beyond them.
+
+            The contribution, never the whole snapshot. The RDS-backed snapshots mirror the
+            tables Bronze was loaded into, so they are a superset of it: adding one whole
+            would count all 28,287 bootstrap rentals twice.
+            """
+            return silver["rows"].get(bronze, 0) + operational.get(f"{bronze}_operational", 0)
+
         expected = {
-            "fact_rental": silver["rows"].get("rental_transactions", 0),
-            "fact_concession_sale": silver["rows"].get("concession_purchases", 0),
-            "fact_points_activity": silver["rows"].get("member_points_ledger", 0),
-            "fact_workstation_event": (
-                silver["rows"].get("workstation_events", 0)
-                + operational.get("workstation_events_operational", 0)
-            ),
+            "fact_rental": expect("rental_transactions"),
+            "fact_concession_sale": expect("concession_purchases"),
+            "fact_concession_line_item": expect("concession_order_items"),
+            "fact_points_activity": expect("member_points_ledger"),
+            "fact_workstation_event": expect("workstation_events"),
         }
         mismatched = {
             table: (count, gold["rows"].get(table))

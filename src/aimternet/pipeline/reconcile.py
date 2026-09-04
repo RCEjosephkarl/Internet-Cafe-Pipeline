@@ -280,13 +280,45 @@ def _snapshot_expectations() -> dict[str, int]:
 # reads these as the *current* state of the operational store, so a delta left here in place
 # of a snapshot silently shrinks a dimension. That is not hypothetical: the first incremental
 # run after the bootstrap did exactly that to members_operational.
-OPERATIONAL_SNAPSHOTS = {
-    "members_operational": "members",
-    "workstations_operational": "workstations",
-    "concession_items_operational": "concession_items",
-    "rental_transactions_operational": "rental_transactions",
-    "concession_purchases_operational": "concession_purchases",
+def _operational_snapshots() -> dict[str, str]:
+    """Derived from ``EXPORTS``, never restated.
+
+    This was a hand-written dict, and a hand-written dict is how F8 happened twice: the
+    Redshift expectations were missing ``dim_member``, so the check that would have caught a
+    stale dimension passed unconditionally. A second list of the same tables is a second
+    place to forget one. Deriving it means a table added to the export cannot be added
+    without also acquiring its ``silver_snapshot:*`` check.
+    """
+    from aimternet.pipeline.curate.export_rds import EXPORTS
+
+    return {f"{table}_operational": table for table in EXPORTS}
+
+
+OPERATIONAL_SNAPSHOTS = _operational_snapshots()
+
+#: Facts built from two origins: the Bronze-derived Silver dataset, and an operational
+#: snapshot of what the POS has written since. ``(bronze dataset, snapshot, primary key)``.
+#:
+#: These counts used to be literals -- 28,287 rentals, 21,077 purchases -- and the literals
+#: were right only because Gold could not see the POS at all. The moment a rental rung up at
+#: the till reaches the warehouse, a constant here is a check that fails whenever the cafe is
+#: open. Expected is therefore the verified Bronze count plus what the snapshot contributes.
+UNIONED_FACTS = {
+    "fact_rental": ("rental_transactions", "rental_transactions_operational", "rental_id"),
+    "fact_concession_sale": (
+        "concession_purchases", "concession_purchases_operational", "purchase_id",
+    ),
+    "fact_concession_line_item": (
+        "concession_order_items", "concession_order_items_operational", "order_item_id",
+    ),
+    "fact_points_activity": (
+        "member_points_ledger", "member_points_ledger_operational", "ledger_id",
+    ),
+    "fact_workstation_event": (
+        "workstation_events", "workstation_events_operational", "event_id",
+    ),
 }
+
 
 #: The DynamoDB export's equivalent. It has no RDS table to be compared against -- the events
 #: it holds exist only in DynamoDB and in this file -- so the check that guards it is that it
@@ -313,7 +345,80 @@ def _high_water_mark(check_name: str) -> int:
     return int(high) if high is not None else 0
 
 
-def _silver_gold_counts() -> tuple[dict[str, int], dict[str, int]]:
+def _snapshot_predicate(fact: str) -> str:
+    """Gold's eligibility rule for ``fact``; empty for the event snapshot, which has none."""
+    from aimternet.pipeline.curate.gold import snapshot_predicate
+
+    bronze_dataset, _snapshot, _key = UNIONED_FACTS[fact]
+    return snapshot_predicate(bronze_dataset)
+
+
+def _contributions(con: object) -> tuple[dict[str, int], dict[str, int]]:
+    """Per unioned fact: (rows the snapshot adds beyond Bronze, rows it shares with Bronze).
+
+    Both halves earn their keep. The first is what an expectation adds to the verified Bronze
+    count. The second is a second, independent F7 detector: the RDS-backed snapshots mirror
+    the very tables Bronze was loaded into, so the overlap *must* be the whole source count.
+    A snapshot holding a delta where a snapshot belongs shows up here as an overlap far below
+    it -- without a watermark, without an RDS connection, and without any history to compare
+    against.
+    """
+    from aimternet.pipeline.curate.engine import count_parquet, layer_uri
+
+    contributed: dict[str, int] = {}
+    overlap: dict[str, int] = {}
+    for fact, (bronze, snapshot, key) in UNIONED_FACTS.items():
+        uri = layer_uri("silver", snapshot)
+        if not count_parquet(con, uri):  # type: ignore[arg-type]
+            contributed[fact], overlap[fact] = 0, 0
+            continue
+        bronze_read = f"read_parquet('{layer_uri('silver', bronze)}/**/*.parquet')"
+        # The same eligibility rule Gold applies, read from Gold rather than restated: it
+        # excludes open rentals, and counting them here would fail this check by exactly the
+        # number of customers currently at a machine.
+        predicate = _snapshot_predicate(fact)
+        eligible = f"WHERE {predicate}" if predicate else ""
+        row = con.execute(  # type: ignore[attr-defined]
+            f"""
+            SELECT count(*) FILTER (WHERE NOT in_bronze) AS contributed,
+                   count(*) FILTER (WHERE in_bronze)     AS overlap
+            FROM (
+                SELECT EXISTS (
+                    SELECT 1 FROM {bronze_read} b WHERE b.{key} = o.{key}
+                ) AS in_bronze
+                FROM (SELECT * FROM read_parquet('{uri}/**/*.parquet') {eligible}) o
+            )
+            """
+        ).fetchone()
+        contributed[fact] = int(row[0]) if row else 0
+        overlap[fact] = int(row[1]) if row else 0
+    return contributed, overlap
+
+
+def _expected_from(contributed: dict[str, int]) -> dict[str, int]:
+    """Bronze plus contribution, for each unioned fact. The formula lives here only."""
+    return {
+        fact: SOURCE_COUNTS[bronze_dataset] + contributed.get(fact, 0)
+        for fact, (bronze_dataset, _snapshot, _key) in UNIONED_FACTS.items()
+    }
+
+
+def unioned_fact_expectations() -> dict[str, int]:
+    """What each two-origin fact should hold, read from S3.
+
+    Public because the integration tests need the same number, and the alternative -- each of
+    them keeping its own copy of 28,287 and 21,077 -- is the frozen-literal habit that made
+    the POS gap invisible in the first place. Those tests are `aws`/`redshift`-marked and do
+    not run in `make check`, so a literal there would rot in silence.
+    """
+    from aimternet.pipeline.curate.engine import duck
+
+    with duck() as con:
+        contributed, _overlap = _contributions(con)
+    return _expected_from(contributed)
+
+
+def _silver_gold_counts() -> tuple[dict[str, int], dict[str, int], dict[str, int], dict[str, int]]:
     from aimternet.pipeline.curate.engine import count_parquet, duck, layer_uri
 
     silver_names = [*SOURCE_COUNTS, *OPERATIONAL_SNAPSHOTS, EVENTS_SNAPSHOT]
@@ -326,7 +431,8 @@ def _silver_gold_counts() -> tuple[dict[str, int], dict[str, int]]:
     with duck() as con:
         silver = {n: count_parquet(con, layer_uri("silver", n)) for n in silver_names}
         gold = {n: count_parquet(con, layer_uri("gold", n)) for n in gold_names}
-    return silver, gold
+        contributed, overlap = _contributions(con)
+    return silver, gold, contributed, overlap
 
 
 def _dynamodb_counts() -> dict[str, int]:
@@ -564,8 +670,10 @@ def reconcile(run_id: str = "", *, include_redshift: bool = True) -> Reconciliat
     # die with a NameError if Silver/Gold could not be read.
     silver: dict[str, int] = {}
     gold: dict[str, int] = {}
+    contributed: dict[str, int] = {}
+    overlap: dict[str, int] = {}
     try:
-        silver, gold = _silver_gold_counts()
+        silver, gold, contributed, overlap = _silver_gold_counts()
         for dataset, expected in SOURCE_COUNTS.items():
             actual = silver.get(dataset, 0)
             report.add(
@@ -575,18 +683,19 @@ def reconcile(run_id: str = "", *, include_redshift: bool = True) -> Reconciliat
                     detail="Silver must preserve every source row",
                 )
             )
-        # fact_workstation_event is the one fact with two sources: the 58,218 Bronze events
-        # and whatever the POS has emitted since, which the DynamoDB export leaves in
-        # `workstation_events_operational`. A literal here would fail every run in which the
-        # cafe was open — and, until the export was fixed, concealed that those events were
-        # being discarded hourly before they ever reached Gold.
-        events_expected = SOURCE_COUNTS["workstation_events"] + silver.get(EVENTS_SNAPSHOT, 0)
+        # Every fact has two sources: the verified Bronze count, and whatever the POS has
+        # written since. The Bronze half stays a literal — Bronze is immutable, and
+        # `silver_rows:*` above already pins it against the source files. The POS half is
+        # derived and cannot freeze. Four of these five were literals for the POC's whole
+        # life, and were correct only because Gold could not see the POS at all; the fifth,
+        # fact_workstation_event, is what that mistake looked like once it was found.
         gold_expected = {
             "dim_workstation": 175, "dim_date": 365, "dim_time": 1_440,
-            "dim_concession_item": 10, "fact_rental": 28_287,
-            "fact_concession_sale": 21_077, "fact_concession_line_item": 29_672,
-            "fact_points_activity": 55_514, "fact_workstation_event": events_expected,
+            "dim_concession_item": 10,
+            # Telemetry has no POS write path — the cafe's own machines emit it, and nothing
+            # the API does adds a reading. 175 workstations x 24 hours x 62 days stands.
             "agg_workstation_utilization_hourly": 175 * 24 * 62,
+            **_expected_from(contributed),
         }
         for dataset, expected in gold_expected.items():
             actual = gold.get(dataset, 0)
@@ -644,6 +753,47 @@ def reconcile(run_id: str = "", *, include_redshift: bool = True) -> Reconciliat
                     ),
                 )
             )
+        # The arithmetic above only holds if each snapshot actually *covers* Bronze. Assert it
+        # rather than assume it. An RDS-backed snapshot mirrors the same table Bronze was
+        # loaded into, so every source row must be in it; an overlap below the source count
+        # means the export left a delta where a snapshot belongs. That is F7 — caught here
+        # with no watermark, no RDS connection and no history, which is three fewer things
+        # than the `silver_snapshot:*` check needs.
+        for fact, (bronze_dataset, snapshot, _key) in UNIONED_FACTS.items():
+            if snapshot == EVENTS_SNAPSHOT:
+                continue  # no Bronze counterpart in RDS; the high-water mark below guards it
+            if not silver.get(snapshot):
+                continue  # the export has not run yet; Gold is legitimately Bronze-only
+            report.add(
+                Check(
+                    name=f"snapshot_covers_bronze:{snapshot}", layer_from="silver",
+                    layer_to="silver",
+                    expected=SOURCE_COUNTS[bronze_dataset], actual=overlap.get(fact, 0),
+                    passed=overlap.get(fact, 0) == SOURCE_COUNTS[bronze_dataset],
+                    severity=SEVERITY_CRITICAL,
+                    detail=(
+                        f"{snapshot} mirrors the RDS table {bronze_dataset} was loaded "
+                        "into, so it "
+                        "must contain every source row. A shortfall means the export wrote "
+                        "the delta it moved instead of the full snapshot Gold reads"
+                    ),
+                )
+            )
+        # The two event id spaces -- source ids and EVT-API-* -- must not collide. The union
+        # dedupes on event_id, so a collision drops an event rather than failing, and the
+        # expectation above (Bronze + contribution) would quietly absorb the loss.
+        report.add(
+            Check(
+                name="event_id_spaces_are_disjoint", layer_from="silver", layer_to="silver",
+                expected=0, actual=overlap.get("fact_workstation_event", 0),
+                passed=overlap.get("fact_workstation_event", 0) == 0,
+                severity=SEVERITY_CRITICAL,
+                detail=(
+                    "a Bronze event id and an API-emitted one must never be equal; the union "
+                    "keeps one row per event_id, so a collision silently loses an event"
+                ),
+            )
+        )
         # The events snapshot has no RDS counterpart to be compared against, so it is held to
         # the property the RDS ones get for free: it may grow, it may hold steady, it may not
         # shrink. Written by the delta instead of the snapshot, it shrank to one hour's events
@@ -686,13 +836,16 @@ def reconcile(run_id: str = "", *, include_redshift: bool = True) -> Reconciliat
             # wrong: it is compared against Gold, which is where it comes from.
             redshift_expected: dict[str, int] = {
                 "dim_workstation": 175, "dim_date": 365, "dim_time": 1_440,
-                "dim_concession_item": 10, "fact_rental": 28_287,
-                "fact_concession_sale": 21_077, "fact_concession_line_item": 29_672,
-                "fact_points_activity": 55_514,
+                "dim_concession_item": 10,
                 "agg_workstation_utilization_hourly": 175 * 24 * 62,
             }
-            for dataset in ("dim_member", "fact_workstation_event"):
-                if gold.get(dataset):
+            # Every fact now moves with the POS, so none of them can be a literal here
+            # either: what Redshift must hold is what Gold built, which is the only thing
+            # this check was ever really asserting. `in`, not truthiness — a legitimately
+            # empty Gold table would otherwise leave its key unset, and an unset key is the
+            # `.get() -> None -> passed=True` shape that hid dim_member for so long.
+            for dataset in ("dim_member", *UNIONED_FACTS):
+                if dataset in gold:
                     redshift_expected[dataset] = gold[dataset]
 
             for table, actual in _redshift_counts().items():

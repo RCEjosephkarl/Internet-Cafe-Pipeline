@@ -91,6 +91,30 @@ def test_telemetry_fleet_health_flags_alerts_against_the_same_thresholds(client)
 # --------------------------------------------------------------------------- Redshift
 
 
+@pytest.mark.aws
+def test_fleet_health_reports_every_peripheral_for_every_sampled_workstation(client) -> None:
+    """Per-peripheral counts must partition the sample, not overlap or lose machines."""
+    from aimternet.api.routers.metrics import PERIPHERALS
+
+    body = client.get("/v1/metrics/telemetry/fleet-health").json()
+    if body["source"] != "dynamodb" or not body["workstations"]:
+        pytest.skip("no telemetry available")
+    sampled = body["fleet"]["sampled_workstations"]
+
+    reported = {row["peripheral"]: row for row in body["fleet"]["peripherals"]}
+    assert set(reported) == set(PERIPHERALS)
+    for name, row in reported.items():
+        assert row["connected"] + row["disconnected"] == sampled, name
+        assert row["disconnected"] == sum(
+            1 for w in body["workstations"] if not w[f"{name}_connected"]
+        )
+
+    # `missing_peripherals` is what the dashboard tables and the alert count both read.
+    assert body["fleet"]["peripheral_alert_count"] == sum(
+        1 for w in body["workstations"] if w["missing_peripherals"]
+    )
+
+
 @pytest.mark.redshift
 def test_utilization_heatmap_window_matches_data_window(client) -> None:
     """The cross-cutting `window` field must come from the table's own MAX(date), which is
@@ -117,6 +141,100 @@ def test_revenue_trend_totals_equal_the_sum_of_its_parts(client) -> None:
             str(row["concession_revenue"])
         )
         assert Decimal(row["total_revenue"]) == expected_total
+
+
+@pytest.mark.redshift
+def test_revenue_trend_concession_matches_the_sale_fact_alone(client) -> None:
+    """The cross-check the internal-consistency test above cannot make.
+
+    ``payment_mix`` reads ``fact_concession_sale`` directly; ``daily`` builds its concession
+    column through a CTE. Two independent paths over the same facts must agree. They did not:
+    the daily CTE used to join the line-item fact and then sum the *sale* total, counting each
+    purchase once per line and inflating concession revenue 1.669x (finding F10). Nothing
+    noticed, because every other assertion here was internal to the row.
+    """
+    body = client.get("/v1/metrics/revenue/trend", params={"days": 365}).json()
+    assert body["source"] == "redshift"
+    daily_rental = sum(Decimal(str(r["rental_revenue"])) for r in body["daily"])
+    daily_concession = sum(Decimal(str(r["concession_revenue"])) for r in body["daily"])
+    mix_total = sum(Decimal(str(m["amount"])) for m in body["payment_mix"])
+    assert daily_rental + daily_concession == mix_total
+
+
+# ------------------------------------------------------------------------------- events
+
+
+@pytest.mark.redshift
+def test_event_summary_totals_agree_across_its_three_groupings(client) -> None:
+    """``daily``, ``by_type`` and ``alerts`` slice one table three ways over one window."""
+    body = client.get("/v1/metrics/events/summary", params={"days": 365}).json()
+    assert body["source"] == "redshift"
+    assert body["by_type"], "fact_workstation_event is loaded; the summary must see it"
+    assert sum(r["events"] for r in body["daily"]) == sum(r["events"] for r in body["by_type"])
+
+    alert_types = {"HARDWARE_ALERT", "PERIPHERAL_ALERT"}
+    from_by_type = sum(r["events"] for r in body["by_type"] if r["event_type"] in alert_types)
+    # `alerts` is capped at the 25 worst workstations, so it can only ever be a subset.
+    assert sum(r["alerts"] for r in body["alerts"]) <= from_by_type
+    for row in body["alerts"]:
+        assert row["hardware_alerts"] + row["peripheral_alerts"] == row["alerts"]
+
+
+@pytest.mark.aws
+def test_recent_events_come_back_newest_first_and_typed(client) -> None:
+    body = client.get("/v1/metrics/events/recent", params={"limit": 5}).json()
+    assert body["source"] == "dynamodb"
+    stamps = [e["timestamp_utc"] for e in body["events"]]
+    assert stamps == sorted(stamps, reverse=True)
+
+    from aimternet.config.business_rules import rules
+
+    assert {e["event_type"] for e in body["events"]} <= rules().event_types
+
+
+# ------------------------------------------------------------------- per-member summary
+
+
+def test_member_summary_totals_match_the_rows_it_returns(client) -> None:
+    """The per-member card is the one place a reader compares a total against its own list."""
+    leaderboard = client.get(
+        "/v1/metrics/members/leaderboard", params={"days": 365, "limit": 1}
+    ).json()
+    if leaderboard.get("source") != "redshift" or not leaderboard["members"]:
+        pytest.skip("no warehouse member to drill into")
+    member_id = leaderboard["members"][0]["member_id"]
+
+    body = client.get(f"/v1/metrics/members/{member_id}/summary").json()
+    assert body["source"] == "rds"
+    assert body["found"] is True
+    assert body["member"]["member_id"] == member_id
+
+    totals = body["totals"]
+    assert Decimal(totals["total_spend"]) == Decimal(totals["rental_spend"]) + Decimal(
+        totals["concession_spend"]
+    )
+    from aimternet.config.business_rules import rules
+
+    balance = int(body["member"]["current_points_balance"])
+    assert totals["redeemable_units"] == balance // rules().redemption_unit_points
+    # The lists are the 25 most recent, so they are a window on the totals, not equal to
+    # them -- but every row in them must belong to this member's own history.
+    assert len(body["rentals"]) <= 25
+    assert len(body["purchases"]) <= 25
+    assert all(r["points_delta"] != 0 for r in body["points_ledger"])
+
+
+def test_member_summary_reports_an_unknown_card_without_raising(client) -> None:
+    """A front-desk typo must read as "no such member", not a 500."""
+    body = client.get("/v1/metrics/members/M-0000/summary").json()
+    assert body["found"] is False
+    assert body["member_id"] == "M-0000"
+
+
+def test_a_static_members_route_is_not_shadowed_by_the_member_id_route(client) -> None:
+    """`/members/{member_id}/summary` is declared last on purpose; prove it stayed there."""
+    body = client.get("/v1/metrics/members/overview", params={"days": 7}).json()
+    assert "by_tier" in body, "the path-parameter route swallowed /members/overview"
 
 
 @pytest.mark.redshift

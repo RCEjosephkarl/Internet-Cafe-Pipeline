@@ -63,11 +63,11 @@ def test_a_happy_path_response_is_returned_as_is(monkeypatch: pytest.MonkeyPatch
 def test_a_degraded_upstream_response_passes_through_unmodified(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    degraded = {"source": "unavailable", "days": 7, "hours": [], "error": "boom"}
+    degraded = {"source": "unavailable", "days": 7, "cells": [], "error": "boom"}
     monkeypatch.setattr(
         httpx, "get", lambda url, params=None, timeout=None: _FakeResponse(degraded)
     )
-    result = api_client.get_utilization_hourly(7)
+    result = api_client.get_utilization_heatmap(7)
     assert result == degraded
 
 

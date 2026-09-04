@@ -21,22 +21,35 @@ from aimternet.pipeline.curate import export_dynamodb, export_rds
 GOLD = Path("src/aimternet/pipeline/curate/gold.py")
 
 
-#: Snapshots Gold does not read today, and why. These are a known, bounded gap -- rows the POS
-#: creates land in RDS, are exported to Silver, and stop there, because the corresponding
-#: facts are still built from the Bronze-derived datasets. Closing it changes the row count of
-#: fact_rental and fact_concession_sale, which are pinned as literals in reconcile.py and in
-#: the Redshift expectations, so it is a deliberate piece of work rather than a side effect.
+#: Snapshots Gold does not read, and why. Both are deliberate, and both are about the *extra*
+#: column the snapshot carries rather than about the catalog itself: the POS cannot add a
+#: workstation or invent a SKU, so the 175 rows and the 10 rows are static either way.
 UNCONSUMED_SNAPSHOTS = {
-    "workstations_operational": "dim_workstation is built from Bronze; the catalog is static",
-    "concession_items_operational": "dim_concession_item is built from Bronze; static catalog",
-    "rental_transactions_operational": (
-        "fact_rental reads silver/rental_transactions (Bronze). API-created rentals therefore "
-        "do not reach the warehouse -- a known gap, not an accident"
+    "workstations_operational": (
+        "dim_workstation is built from Bronze deliberately. The column the snapshot adds is "
+        "`status`, which is live occupancy -- not a dimension attribute. Folding it into a "
+        "Type-1 dimension would make every historical join answer 'where is this PC right "
+        "now', and /workstations/status already serves that live from RDS"
     ),
-    "concession_purchases_operational": (
-        "fact_concession_sale reads silver/concession_purchases (Bronze). Same gap"
+    "concession_items_operational": (
+        "dim_concession_item is built from Bronze deliberately. The column the snapshot adds "
+        "is `stock_quantity`, which every sale decrements; a Type-1 overwrite of a "
+        "fast-changing measure into a dimension rewrites history on every build"
     ),
 }
+
+#: The snapshots that carry POS transactions. Each one was unread for the POC's whole life,
+#: which is exactly why the gap survived: a snapshot nobody reads cannot be observed to be
+#: wrong. Pinned positively, not merely omitted from the dict above, so that deleting the
+#: read from gold.py fails here instead of quietly reopening the gap.
+CONSUMED_SNAPSHOTS = (
+    "members_operational",
+    "rental_transactions_operational",
+    "concession_purchases_operational",
+    "concession_order_items_operational",
+    "member_points_ledger_operational",
+    "workstation_events_operational",
+)
 
 
 def _gold_source() -> str:
@@ -61,10 +74,22 @@ def test_each_snapshot_is_read_by_gold_or_declared_unread(dataset: str) -> None:
     )
 
 
-def test_the_events_snapshot_is_read_by_gold() -> None:
-    """The one this change closed. Pinned separately so it cannot quietly regress."""
-    assert export_dynamodb.DATASET not in UNCONSUMED_SNAPSHOTS
-    assert export_dynamodb.DATASET in _gold_source()
+@pytest.mark.parametrize("dataset", CONSUMED_SNAPSHOTS)
+def test_the_transactional_snapshots_are_read_by_gold(dataset: str) -> None:
+    """The gap this closed. Pinned positively so it cannot quietly reopen.
+
+    The XOR above is satisfied by *either* reading a snapshot or declaring it unread, so on
+    its own it would let someone stop reading one and add a reason instead. These are the
+    snapshots carrying money the cafe actually took; none of them may go back to being
+    declared away.
+    """
+    assert dataset not in UNCONSUMED_SNAPSHOTS
+    assert dataset in _gold_source()
+
+
+def test_every_consumed_snapshot_is_actually_written() -> None:
+    """A pin on a snapshot no export writes would pass for the wrong reason."""
+    assert set(CONSUMED_SNAPSHOTS) <= _all_snapshots()
 
 
 def test_every_unconsumed_snapshot_carries_a_reason() -> None:

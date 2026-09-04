@@ -67,11 +67,19 @@ ssh -i jupyter.pem -L 8000:localhost:8000 -L 8080:localhost:8080 ubuntu@<host>
 | DAG | Schedule | What it does |
 |---|---|---|
 | `bootstrap_raw_landing` | manual | The only DAG that reads the EC2 landing directory |
-| `rds_to_s3_incremental` | `0 * * * *` | RDS -> Silver snapshots, by `updated_at` watermark |
-| `dynamodb_to_s3_incremental` | `15 * * * *` | API-emitted events -> Silver **snapshot**, via GSI2 per event type |
-| `curate_silver_gold` | `30 * * * *` | Bronze -> Silver -> Gold |
-| `load_redshift` | `45 * * * *` | Gold -> Redshift, delete-then-insert per table |
+| `rds_to_s3_incremental` | `*/15 * * * *` | RDS -> Silver snapshots, by `updated_at` watermark. Publishes `SILVER_RDS` |
+| `dynamodb_to_s3_incremental` | `*/15 * * * *` | API-emitted events -> Silver **snapshot**, via GSI2 per event type. Publishes `SILVER_DYNAMODB` |
+| `curate_silver_gold` | on `SILVER_RDS` **and** `SILVER_DYNAMODB` | Bronze -> Silver -> Gold. Publishes `GOLD` |
+| `load_redshift` | on `GOLD` | Gold -> Redshift, delete-then-insert per table |
 | `reconcile_data` | `0 */6 * * *` | Every check; a critical failure fails the run |
+
+The four pipeline DAGs are **chained on Airflow Assets** (`dags/_common.py`), not staggered on
+the clock. They used to run at `:00`, `:15`, `:30` and `:45`, which put a POS sale up to 1h45m
+away from the dashboard and — worse — let `load_redshift` fire on a Gold build that
+`curate_silver_gold` had not finished writing, because nothing connected them but a guess about
+how long each stage takes. Now each stage triggers the next off the data it produced. A list
+schedule is AND, so `curate` waits for *both* exports; that is why the two exports publish
+different assets rather than sharing one.
 
 They are tuned through **Airflow Variables**, not code:
 

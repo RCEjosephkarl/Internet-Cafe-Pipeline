@@ -62,24 +62,8 @@ def get_workstations_status() -> dict[str, Any]:
 
 
 @st.cache_data(ttl=60)
-def get_rentals_active() -> list[dict[str, Any]]:
-    result = _get("/rentals/active")
-    return result if isinstance(result, list) else []
-
-
-@st.cache_data(ttl=60)
-def get_telemetry_recent(limit: int = 12) -> dict[str, Any]:
-    return _get("/telemetry/recent", {"limit": limit})
-
-
-@st.cache_data(ttl=60)
 def get_telemetry_fleet_health() -> dict[str, Any]:
     return _get("/telemetry/fleet-health")
-
-
-@st.cache_data(ttl=60)
-def get_utilization_hourly(days: int) -> dict[str, Any]:
-    return _get("/utilization/hourly", {"days": days})
 
 
 @st.cache_data(ttl=60)
@@ -87,7 +71,17 @@ def get_utilization_heatmap(days: int) -> dict[str, Any]:
     return _get("/utilization/heatmap", {"days": days})
 
 
-# --------------------------------------------------------------------------- Descriptive Analytics
+@st.cache_data(ttl=60)
+def get_events_summary(days: int) -> dict[str, Any]:
+    return _get("/events/summary", {"days": days})
+
+
+@st.cache_data(ttl=60)
+def get_events_recent(limit: int = 25) -> dict[str, Any]:
+    return _get("/events/recent", {"limit": limit})
+
+
+# --------------------------------------------------------------------------- Business Analytics
 
 
 @st.cache_data(ttl=60)
@@ -120,24 +114,12 @@ def get_members_overview(days: int) -> dict[str, Any]:
     return _get("/members/overview", {"days": days})
 
 
-# --------------------------------------------------------------------------- Data Science
-
-
 @st.cache_data(ttl=60)
 def get_members_leaderboard(days: int, limit: int = 25) -> dict[str, Any]:
     return _get("/members/leaderboard", {"days": days, "limit": limit})
 
 
 @st.cache_data(ttl=60)
-def get_members_tier_migration(days: int) -> dict[str, Any]:
-    return _get("/members/tier-migration", {"days": days})
-
-
-@st.cache_data(ttl=60)
-def get_workstations_health_score(days: int) -> dict[str, Any]:
-    return _get("/workstations/health-score", {"days": days})
-
-
-@st.cache_data(ttl=60)
-def get_efficiency_revenue_per_hour(days: int) -> dict[str, Any]:
-    return _get("/efficiency/revenue-per-hour", {"days": days})
+def get_member_summary(member_id: str) -> dict[str, Any]:
+    """One member's whole history. RDS-backed, so it matches the till exactly."""
+    return _get(f"/members/{member_id}/summary")
