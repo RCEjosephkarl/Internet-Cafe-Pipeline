@@ -41,14 +41,15 @@ item 14 and `make reconcile` checks it.
 ## 3. Day to day
 
 ```bash
-make api                      # :8000 — operational API, metrics API, /dashboard
+make api                      # :8000 — operational API, metrics API
+make streamlit                # :8501 — dashboard (HTTP-only client of the metrics API)
 make airflow                  # :8080 — api-server + scheduler
 jupyter lab                   # :8888 — the four notebooks
 ```
 
 | Where | What |
 |---|---|
-| `http://<host>:8000/dashboard` | Live metrics, 15-second refresh |
+| `http://<host>:8501` | Streamlit dashboard — PC Telemetry, Descriptive Analytics, Data Science |
 | `http://<host>:8000/docs` | OpenAPI for the operational API |
 | `http://<host>:8080` | Airflow UI |
 | `notebooks/pos_terminal.ipynb` | The till. HTTP only |

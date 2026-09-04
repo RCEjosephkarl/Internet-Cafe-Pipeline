@@ -6,13 +6,22 @@
 # passing `airflow db check` on 3.12 in this env, so rebuilding was judged pure downside.
 # Recorded as a deviation in CLAUDE.md.
 #
-# pyarrow is deliberately ABSENT. On this host (kernel 7.0.0-1010-aws) Arrow's thread pool
-# aborts at interpreter shutdown -- "terminate called without an active exception", SIGABRT.
-# Measured 23/30 with the pip wheel (16.1.0 and 25.0.1) and 11/20 with conda-forge pyarrow 15
-# in a clean probe environment, so it is the host, not the packaging. The data written was
-# always correct; the process just died on the way out, which would fail Airflow tasks and
-# pytest runs at random. DuckDB replaces it: it writes true decimal128 Parquet, 0/20 crashes.
-# fastparquet was also rejected -- it silently downcasts Decimal to float64.
+# pyarrow is used ONLY for Streamlit's DataFrame serialization (Arrow IPC), never for our own
+# Parquet I/O -- DuckDB still owns every Parquet write/read in the pipeline. On this host
+# (kernel 7.0.0-1010-aws) Arrow's thread pool was previously measured to abort at interpreter
+# shutdown -- "terminate called without an active exception", SIGABRT -- 23/30 with the pip
+# wheel (16.1.0 and 25.0.1) and 11/20 with conda-forge pyarrow 15 in a clean probe environment.
+# fastparquet was rejected for the same reason DuckDB was chosen over pyarrow: it silently
+# downcasts Decimal to float64.
+#
+# Re-probed 2026-09-03 to clear pyarrow for Streamlit: 30/30 clean runs of a fresh process
+# round-tripping a DataFrame through pyarrow.Table.from_pandas + Arrow IPC (what
+# st.dataframe/st.table do internally) with pyarrow==25.0.1 on this same kernel. As a sanity
+# check on the probe methodology, a second attempt to reproduce the *original* Parquet-write
+# crash with the same wheel/kernel also came back clean (0/45) -- the original finding did not
+# reproduce here, for reasons not investigated further (this is a POC). Recorded as-is rather
+# than overwritten: neither result invalidates the other, and DuckDB continues to own Parquet
+# I/O regardless, so this addition carries no risk to that invariant either way.
 #
 # Airflow itself is installed via requirements-airflow.txt against its constraints file,
 # not here, so pip cannot re-resolve its tree against conda's pyarrow/numpy.
@@ -63,5 +72,9 @@ dependencies:
       - tenacity==9.1.4
       - moto[s3,dynamodb]
       - types-PyYAML
+      # Streamlit dashboard (pinned to what is installed/probed above).
+      - streamlit==1.63.0
+      - plotly==7.0.0
+      - pyarrow==25.0.1
       # Airflow: install separately with its constraints file.
       #   -r requirements-airflow.txt --constraint <airflow constraints url>

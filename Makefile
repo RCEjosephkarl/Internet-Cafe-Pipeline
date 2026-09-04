@@ -16,7 +16,7 @@ export PYTHONPATH := $(REPO_ROOT)/src
 .PHONY: help env link test lint typecheck check migrate assumptions docs infra-plan validate \
         quarantine-demo manifest bronze \
         bootstrap load-rds load-dynamodb curate redshift \
-        reconcile api metrics airflow dashboard clean
+        reconcile api metrics airflow streamlit clean
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -100,14 +100,14 @@ redshift: ## Redshift DDL + load Gold (COPY when available, else batched INSERT)
 reconcile: ## Cross-layer reconciliation report
 	$(PY) -m aimternet.pipeline.cli reconcile
 
-api: ## Operational API on :8000 (also serves /dashboard)
+api: ## Operational API on :8000 (the only thing streamlit/ talks to)
 	$(PY) -m uvicorn aimternet.api.main:app --host 0.0.0.0 --port 8000
 
 metrics: ## Metrics API — same app, mounted at /v1/metrics
 	@echo "Metrics live under the same app as 'make api': http://localhost:8000/v1/metrics"
 
-dashboard: ## Print the dashboard URL
-	@echo "http://localhost:8000/dashboard  (remote: ssh -i jupyter.pem -L 8000:localhost:8000 ubuntu@<host>)"
+streamlit: ## Streamlit dashboard on :8501 (talks to the metrics API over HTTP only)
+	$(PY) -m streamlit run streamlit_app/Home.py --server.port 8501
 
 airflow: ## Airflow standalone (api-server + scheduler) on :8080
 	AIRFLOW_HOME=$(AIRFLOW_HOME) $(CONDA_PREFIX_DIR)/bin/airflow standalone

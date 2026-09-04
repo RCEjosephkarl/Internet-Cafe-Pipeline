@@ -1,11 +1,10 @@
-"""The AIMternet-Cafe operational API (spec §7.1, §7.2, §7.4).
+"""The AIMternet-Cafe operational API (spec §7.1, §7.2; §7.4 superseded, see CLAUDE.md).
 
 This process is the only write path for the POS terminal, and it also serves the read-only
-metrics router and the static dashboard. One app, three concerns kept separate:
+metrics router the Streamlit dashboard (``streamlit_app/``) talks to over HTTP:
 
 * ``/v1/...``      — operational writes and reads, backed by RDS
 * ``/v1/metrics/...`` — read-only aggregates
-* ``/dashboard``   — static HTML/JS that talks to the metrics API and nothing else
 
 There is deliberately no endpoint that accepts SQL (§3).
 """
@@ -16,11 +15,9 @@ import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from pathlib import Path
 
 from fastapi import FastAPI, Request, status
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 
 from aimternet import __version__
 from aimternet.api import errors
@@ -29,8 +26,6 @@ from aimternet.api.schemas import Health
 from aimternet.config.settings import settings
 
 log = logging.getLogger("aimternet.api")
-
-DASHBOARD_DIR = Path(__file__).resolve().parents[3] / "dashboard"
 
 app = FastAPI(
     title="AIMternet-Cafe Operational API",
@@ -126,22 +121,11 @@ def healthz() -> Health:
     )
 
 
-@app.get("/dashboard", include_in_schema=False)
-def dashboard() -> FileResponse:
-    """The operations dashboard (spec §7.4). Static HTML/JS; it reads the metrics API only."""
-    return FileResponse(DASHBOARD_DIR / "index.html")
-
-
-if DASHBOARD_DIR.is_dir():
-    app.mount("/static", StaticFiles(directory=DASHBOARD_DIR), name="static")
-
-
 @app.get("/", include_in_schema=False)
 def index() -> dict[str, str]:
     return {
         "service": "AIMternet-Cafe Operational API",
         "version": __version__,
         "docs": "/docs",
-        "dashboard": "/dashboard",
         "health": "/healthz",
     }

@@ -8,7 +8,7 @@ A data engineering POC for an internet cafe: 4.2 GB of synthesized 2026-07-01…
 data flows from an EC2 landing directory through Airflow into S3 Bronze, is validated and normalized,
 loads into RDS PostgreSQL (operational) and DynamoDB (events + telemetry), is curated into S3
 Silver/Gold Parquet, and lands in Redshift as a dimensional model. A FastAPI operational API is the only
-write path for the Jupyter POS terminal; a metrics API feeds an HTML/JS dashboard.
+write path for the Jupyter POS terminal; a metrics API feeds a Streamlit dashboard.
 
 Build spec: `pipeline_plan_AWS.md` (authoritative). `pipeline_plan.md` is an earlier, looser draft.
 
@@ -37,6 +37,17 @@ pytest runs at random. fastparquet was also rejected: it silently downcasts `Dec
 which breaks the no-floats-in-money rule. DuckDB writes true `decimal128(12,2)` Parquet, crashed 0/20,
 flattens the nested telemetry JSON natively, and converted one day of telemetry (24 files, 50,400 rows)
 in 0.2 s at 159 MB peak RSS. If you reintroduce pyarrow, re-run the stress test first.
+
+**pyarrow is back, but only for Streamlit.** The dashboard pivoted to Streamlit (below), whose
+`st.dataframe`/`st.table`/native charts hard-require pyarrow to serialize `pandas.DataFrame` via
+Arrow IPC — a different code path from Parquet I/O. Re-probed 2026-09-03 on this same host/kernel:
+**30/30** clean fresh-process runs round-tripping a DataFrame through `pyarrow.Table.from_pandas` +
+Arrow IPC with `pyarrow==25.0.1`. As a methodology sanity check, a fresh attempt to reproduce the
+*original* Parquet-write crash with the same wheel/kernel also came back clean (**0/45**) — that
+finding did not reproduce this time, for reasons not investigated further (this is a POC; recorded
+as-is rather than silently overwritten). DuckDB still owns every Parquet read/write in the
+pipeline — pyarrow is not reintroduced there, and a follow-up DuckDB Parquet-write check with
+pyarrow now co-installed also came back clean (0/15).
 
 ## Invariants — do not break these
 
@@ -127,7 +138,8 @@ make redshift    # Redshift DDL + COPY/MERGE
 make reconcile   # cross-layer reconciliation report
 make docs        # regenerate docs/assumptions.md from poc_policy.py
 make infra-plan  # terraform init + plan (never apply without asking, never destroy)
-make api         # operational + metrics API on :8000, dashboard at /dashboard
+make api         # operational + metrics API on :8000
+make streamlit   # Streamlit dashboard on :8501 (HTTP-only client of the metrics API)
 make airflow     # airflow standalone on :8080
 ```
 
