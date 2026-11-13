@@ -36,3 +36,6 @@ artifacts/
 
 # --- project docs not for the repo ---
 Project*.pdf
+
+# --- data ---
+data/
